@@ -1,0 +1,28 @@
+# QRS-EL 测试配置：ByteChef 工作流引擎
+# 目标仓库: https://github.com/bytechefhq/bytechef
+# 语言: Java (73.1%) + TypeScript (26.2%)
+
+github_url: https://github.com/bytechefhq/bytechef
+language: java
+
+# 并行扫描三种 EL 注入漏洞类型
+vuln_types:
+  - Spring EL Injection
+  - OGNL Injection
+  - MVEL Injection
+
+# Agent-Q 配置
+max_retries: 3
+
+# Agent-R 配置（置信度阈值适当降低，捕获更多可疑点）
+min_confidence: 0.5
+
+# 并发线程数（建库后并行执行 Phase 2-5）
+parallel_workers: 3
+
+# 报告输出
+output_json: data/results/bytechef_report.json
+output_html: data/results/bytechef_report.html
+
+# 克隆后保留源码（用于 Agent-R 读取代码上下文）
+no_cleanup: true

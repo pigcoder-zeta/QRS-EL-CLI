@@ -1,0 +1,12 @@
+{
+  "records": [
+    {
+      "rule_id": "java_20260329030553",
+      "language": "java",
+      "vuln_type": "Spring EL Injection",
+      "query_path": "data\\rule_memory\\rules\\java_20260329030553_java_Spring_EL_Injection_ba825ae0.ql",
+      "created_at": "2026-03-29T03:05:53.380960+00:00",
+      "tags": []
+    }
+  ]
+}

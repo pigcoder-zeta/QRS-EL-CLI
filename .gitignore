@@ -1,0 +1,24 @@
+# 密钥文件，绝不提交
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# 数据目录（数据库和结果体积较大）
+data/databases/
+data/workspaces/
+data/results/
+
+# 运行时产生的历史与缓存（每台机器各不相同）
+data/scan_history.json
+data/db_cache.json
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

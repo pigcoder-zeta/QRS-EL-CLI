@@ -1,0 +1,752 @@
+"""
+QRS-EL 系统 CLI 入口。
+
+支持三种扫描模式：
+  # 本地目录 · 单漏洞类型
+  python -m src.main --source-dir ./target --language java --vuln-type "Spring EL Injection"
+
+  # GitHub URL（自动克隆 + 构建探测）
+  python -m src.main --github-url https://github.com/WebGoat/WebGoat `
+      --language java --vuln-type "Spring EL Injection"
+
+  # 多漏洞并行扫描（建库一次，共享数据库）
+  python -m src.main --github-url https://github.com/WebGoat/WebGoat `
+      --language java --vuln-types "Spring EL Injection" "OGNL Injection" "MVEL Injection"
+
+  # 环境健康检查
+  python -m src.main --check
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from dotenv import load_dotenv
+from rich.console import Console
+
+if TYPE_CHECKING:
+    from src.orchestrator.coordinator import PipelineConfig, PipelineState
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
+from rich import box
+
+load_dotenv()
+
+console = Console()
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 日志配置（rich 处理器）
+# ---------------------------------------------------------------------------
+
+
+def _configure_logging(verbose: bool) -> None:
+    """配置日志：非 verbose 时隐藏 DEBUG，并屏蔽 rich 的重复输出。"""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stderr)],
+    )
+    # 降低第三方库的日志噪音
+    for noisy in ("httpx", "openai", "httpcore", "git"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# 环境健康检查
+# ---------------------------------------------------------------------------
+
+
+def _list_templates() -> None:
+    """列出所有内置 QL 模板，以富文本表格展示。"""
+    from src.utils.ql_template_library import _ALL_TEMPLATES
+
+    table = Table(
+        title="[bold cyan]QRS-EL 内置 QL 规则模板[/bold cyan]",
+        box=box.ROUNDED, show_header=True, header_style="bold magenta",
+    )
+    table.add_column("Key",         style="cyan",  no_wrap=True)
+    table.add_column("语言",        width=10)
+    table.add_column("漏洞类型关键词", width=14)
+    table.add_column("描述",        style="dim")
+
+    for tmpl in _ALL_TEMPLATES:
+        lang_color = "green" if tmpl.language == "java" else "blue"
+        table.add_row(
+            tmpl.key,
+            f"[{lang_color}]{tmpl.language}[/{lang_color}]",
+            tmpl.vuln_type,
+            tmpl.description,
+        )
+
+    console.print(table)
+    console.print(
+        f"\n  共 [bold]{len(_ALL_TEMPLATES)}[/bold] 个内置模板。"
+        "使用 [cyan]--vuln-type[/cyan] 指定漏洞类型时，"
+        "系统会自动匹配最合适的模板。\n"
+    )
+
+
+def _apply_yaml_config(args: argparse.Namespace) -> None:
+    """
+    从 YAML 配置文件加载参数，仅覆盖 CLI 中未显式设置的项。
+
+    YAML 示例（qrs-el.yml）：
+      language: java
+      vuln_type: Spring EL Injection
+      github_url: https://github.com/WebGoat/WebGoat
+      max_retries: 5
+      min_confidence: 0.7
+      no_agent_s: true
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        console.print("[yellow]警告：未安装 PyYAML，忽略 --config 参数。"
+                      "运行 pip install pyyaml 安装。[/yellow]")
+        return
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        console.print(f"[red]配置文件不存在: {args.config}[/red]")
+        sys.exit(1)
+
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            cfg: dict = yaml.safe_load(fh) or {}
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]配置文件解析失败: {exc}[/red]")
+        sys.exit(1)
+
+    # 只覆盖默认值（CLI 显式传入的参数优先）
+    _yaml_to_arg(args, cfg, "language",          "language")
+    _yaml_to_arg(args, cfg, "vuln_type",         "vuln_type")
+    _yaml_to_arg(args, cfg, "vuln_types",        "vuln_types")
+    _yaml_to_arg(args, cfg, "source_dir",        "source_dir")
+    _yaml_to_arg(args, cfg, "github_url",        "github_url")
+    _yaml_to_arg(args, cfg, "sink_hints",        "sink_hints")
+    _yaml_to_arg(args, cfg, "max_retries",       "max_retries")
+    _yaml_to_arg(args, cfg, "min_confidence",    "min_confidence")
+    _yaml_to_arg(args, cfg, "parallel_workers",  "parallel_workers")
+    _yaml_to_arg(args, cfg, "output_json",       "output_json")
+    _yaml_to_arg(args, cfg, "no_agent_r",        "no_agent_r")
+    _yaml_to_arg(args, cfg, "no_agent_s",        "no_agent_s")
+    _yaml_to_arg(args, cfg, "no_rule_memory",    "no_rule_memory")
+    _yaml_to_arg(args, cfg, "codeql_path",       "codeql_path")
+    logger.info("[Config] 已从 %s 加载配置", args.config)
+
+
+def _yaml_to_arg(
+    args: argparse.Namespace, cfg: dict, yaml_key: str, arg_key: str
+) -> None:
+    """若 args 中对应属性仍为默认值（None / False），则从 cfg 中覆盖。"""
+    if yaml_key not in cfg:
+        return
+    current = getattr(args, arg_key, None)
+    if current is None or current is False:
+        setattr(args, arg_key, cfg[yaml_key])
+
+
+def _run_check() -> None:
+    """检查运行 QRS-EL 所需的关键依赖是否就绪。"""
+    console.print(Panel("[bold cyan]QRS-EL 环境健康检查[/bold cyan]", expand=False))
+
+    checks: list[tuple[str, bool, str]] = []
+
+    # Python 版本
+    major, minor = sys.version_info[:2]
+    ok = major >= 3 and minor >= 10
+    checks.append(("Python ≥ 3.10", ok, f"{major}.{minor}.{sys.version_info.micro}"))
+
+    # CodeQL CLI
+    codeql_bin = shutil.which("codeql")
+    ok = codeql_bin is not None
+    detail = codeql_bin or "未找到（请将 CodeQL CLI 目录加入 PATH）"
+    checks.append(("CodeQL CLI", ok, detail))
+
+    if codeql_bin:
+        try:
+            result = subprocess.run(
+                ["codeql", "version", "--format=terse"],
+                capture_output=True, text=True, timeout=10,
+            )
+            ver = result.stdout.strip().splitlines()[0] if result.returncode == 0 else "未知"
+        except Exception:
+            ver = "版本获取失败"
+        checks.append(("  └ CodeQL 版本", True, ver))
+
+    # Git
+    git_bin = shutil.which("git")
+    checks.append(("Git", git_bin is not None, git_bin or "未找到"))
+
+    # API Key
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    key_ok = bool(api_key)
+    checks.append((
+        "OPENAI_API_KEY",
+        key_ok,
+        f"已设置（...{api_key[-6:]}）" if key_ok else "未设置（需在 .env 中配置）",
+    ))
+
+    # Python 包检查
+    for pkg, import_name in [
+        ("langchain-openai", "langchain_openai"),
+        ("GitPython",        "git"),
+        ("scikit-learn",     "sklearn"),
+        ("rich",             "rich"),
+    ]:
+        try:
+            __import__(import_name)
+            checks.append((f"  pkg: {pkg}", True, "已安装"))
+        except ImportError:
+            checks.append((f"  pkg: {pkg}", False, "未安装（pip install " + pkg + "）"))
+
+    # data 目录
+    for d in ["data/databases", "data/queries", "data/results", "data/rule_memory"]:
+        exists = Path(d).exists()
+        checks.append((f"  dir: {d}", exists, "存在" if exists else "不存在（将在首次运行时自动创建）"))
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta")
+    table.add_column("检查项", style="cyan", no_wrap=True)
+    table.add_column("状态", justify="center")
+    table.add_column("详情", style="dim")
+
+    all_pass = True
+    for name, ok, detail in checks:
+        icon = "[green]✔[/green]" if ok else "[red]✘[/red]"
+        if not ok:
+            all_pass = False
+        table.add_row(name, icon, detail)
+
+    console.print(table)
+
+    # 显示历史扫描统计
+    try:
+        from src.utils.scan_history import ScanHistory
+        hist = ScanHistory()
+        if hist.count() > 0:
+            s = hist.stats()
+            console.print(
+                f"\n  [dim]历史扫描记录: {s['total_runs']} 次 | "
+                f"成功 {s['success_runs']} | "
+                f"累计发现漏洞 {s['total_vulnerabilities_found']} 处 | "
+                f"缓存命中 {s['db_cache_hits']} 次[/dim]"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if all_pass:
+        console.print("[bold green]所有检查通过，环境就绪！[/bold green]")
+    else:
+        console.print("[bold red]部分检查未通过，请按提示修复后再运行扫描。[/bold red]")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# CLI 参数解析
+# ---------------------------------------------------------------------------
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="qrs-el",
+        description="QRS-EL：多 Agent 协同的 CodeQL 规则自动生成与表达式注入漏洞检测系统",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  python -m src.main --check
+  python -m src.main --source-dir ./target --language java --vuln-type "Spring EL Injection"
+  python -m src.main --github-url https://github.com/WebGoat/WebGoat \\
+      --language java --vuln-types "Spring EL Injection" "OGNL Injection"
+        """,
+    )
+
+    # ── 特殊模式 ─────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="运行环境健康检查后退出（不执行扫描）",
+    )
+    parser.add_argument(
+        "--list-templates",
+        action="store_true",
+        help="列出所有内置 QL 规则模板后退出",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help="从 YAML 配置文件加载参数（会被 CLI 参数覆盖）",
+    )
+
+    # ── 输入源（二选一）──────────────────────────────────────────────────
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument(
+        "--source-dir", metavar="PATH",
+        help="本地源码根目录路径",
+    )
+    input_group.add_argument(
+        "--github-url", metavar="URL",
+        help="GitHub 仓库 URL（自动克隆 + 构建探测）",
+    )
+
+    # ── 分析参数 ─────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--language",
+        choices=["java", "python", "javascript", "go", "csharp", "cpp"],
+        help="目标编程语言",
+    )
+    vuln_group = parser.add_mutually_exclusive_group()
+    vuln_group.add_argument(
+        "--vuln-type", metavar="TYPE",
+        help='单漏洞类型，如 "Spring EL Injection"',
+    )
+    vuln_group.add_argument(
+        "--vuln-types", nargs="+", metavar="TYPE",
+        help='多漏洞并行扫描，空格分隔',
+    )
+
+    # ── 可选参数 ─────────────────────────────────────────────────────────
+    parser.add_argument("--sink-hints", default=None, metavar="HINTS")
+    parser.add_argument("--codeql-path", default="codeql", metavar="PATH")
+    parser.add_argument("--workspace-dir", default="data/workspaces", metavar="DIR")
+    parser.add_argument("--db-dir", default="data/databases", metavar="DIR")
+    parser.add_argument("--results-dir", default="data/results", metavar="DIR")
+    parser.add_argument("--queries-dir", default="data/queries", metavar="DIR")
+    parser.add_argument("--rule-memory-dir", default="data/rule_memory", metavar="DIR")
+    parser.add_argument("--max-retries", type=int, default=3, metavar="N")
+    parser.add_argument("--parallel-workers", type=int, default=3, metavar="N")
+    parser.add_argument("--min-confidence", type=float, default=0.6, metavar="FLOAT")
+    parser.add_argument(
+        "--output-json", default=None, metavar="PATH",
+        help="将扫描结果导出为 JSON 文件（如 data/results/report.json）",
+    )
+    parser.add_argument(
+        "--output-html", default=None, metavar="PATH",
+        help="将扫描结果导出为 HTML 报告（如 data/results/report.html）",
+    )
+    parser.add_argument("--no-cleanup", action="store_true")
+    parser.add_argument("--no-agent-r", action="store_true")
+    parser.add_argument("--no-agent-s", action="store_true")
+    parser.add_argument("--no-rule-memory", action="store_true")
+    parser.add_argument(
+        "--no-build", action="store_true",
+        help="跳过项目编译（CodeQL --build-mode=none），适合构建环境不完整或大型 Java 项目",
+    )
+    parser.add_argument("--openai-api-key", default=None, metavar="KEY")
+    parser.add_argument("--verbose", action="store_true")
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# 主函数
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    _configure_logging(args.verbose)
+
+    # ── 健康检查模式 ──────────────────────────────────────────────────
+    if args.check:
+        _run_check()
+        return
+
+    # ── 列出模板 ──────────────────────────────────────────────────────
+    if args.list_templates:
+        _list_templates()
+        return
+
+    # ── YAML 配置文件（优先级低于 CLI 参数）──────────────────────────
+    if args.config:
+        _apply_yaml_config(args)
+
+    # ── 常规扫描：校验必填参数 ────────────────────────────────────────
+    if not args.source_dir and not args.github_url:
+        parser.error("扫描模式下必须提供 --source-dir 或 --github-url")
+    if not args.language:
+        parser.error("必须提供 --language")
+    if not args.vuln_type and not args.vuln_types:
+        parser.error("必须提供 --vuln-type 或 --vuln-types")
+
+    # ── API Key ───────────────────────────────────────────────────────
+    if args.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = args.openai_api_key
+    if not os.environ.get("OPENAI_API_KEY"):
+        console.print(
+            "[red]错误：未设置 OPENAI_API_KEY，请在 .env 文件中配置或"
+            "通过 --openai-api-key 传入。[/red]"
+        )
+        sys.exit(1)
+
+    # ── 本地目录校验 ──────────────────────────────────────────────────
+    if args.source_dir:
+        source_path = Path(args.source_dir)
+        if not source_path.is_dir():
+            console.print(f"[red]错误：本地源码目录不存在: {args.source_dir}[/red]")
+            sys.exit(1)
+        resolved_source = str(source_path.resolve())
+    else:
+        resolved_source = None
+
+    # ── 延迟导入（确保 env 已就绪）───────────────────────────────────
+    from src.orchestrator.coordinator import Coordinator, PipelineConfig
+    from src.utils.result_exporter import export_json
+    from src.utils.html_reporter import export_html
+    from src.utils.scan_history import ScanHistory
+
+    vuln_types: list[str] = args.vuln_types or [args.vuln_type]
+
+    base_config = PipelineConfig(
+        language=args.language,
+        vuln_type=vuln_types[0],
+        source_dir=resolved_source,
+        github_url=getattr(args, "github_url", None),
+        workspace_dir=args.workspace_dir,
+        db_base_dir=args.db_dir,
+        results_dir=args.results_dir,
+        queries_dir=args.queries_dir,
+        rule_memory_dir=args.rule_memory_dir,
+        sink_hints=args.sink_hints,
+        codeql_executable=args.codeql_path,
+        max_retries=args.max_retries,
+        cleanup_workspace=not args.no_cleanup,
+        enable_agent_r=not args.no_agent_r,
+        agent_r_min_confidence=args.min_confidence,
+        enable_agent_s=not args.no_agent_s,
+        enable_rule_memory=not args.no_rule_memory,
+        build_mode="none" if args.no_build else "",
+    )
+
+    import time
+    _t_start = time.monotonic()
+
+    try:
+        states = _run_with_progress(base_config, vuln_types, args.parallel_workers)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]用户中断执行。[/yellow]")
+        sys.exit(0)
+
+    elapsed = time.monotonic() - _t_start
+
+    # ── 结果展示 ─────────────────────────────────────────────────────
+    _print_rich_summary(states)
+
+    # ── 扫描历史记录 ─────────────────────────────────────────────────
+    try:
+        source_label = base_config.github_url or base_config.source_dir or ""
+        history = ScanHistory(history_dir=args.db_dir.replace("databases", "").rstrip("/\\") or "data")
+        history.record(states, language=args.language,
+                       source=source_label, elapsed_seconds=elapsed)
+    except Exception as _he:  # noqa: BLE001
+        logger.debug("扫描历史写入失败（非致命）: %s", _he)
+
+    # ── JSON 导出 ─────────────────────────────────────────────────────
+    if args.output_json:
+        try:
+            export_json(states, args.output_json, language=args.language)
+            console.print(f"[green]JSON 报告已保存: {args.output_json}[/green]")
+        except OSError as exc:
+            console.print(f"[red]JSON 导出失败: {exc}[/red]")
+
+    # ── HTML 导出 ─────────────────────────────────────────────────────
+    if args.output_html:
+        try:
+            export_html(states, args.output_html, language=args.language)
+            console.print(f"[green]HTML 报告已保存: {args.output_html}[/green]")
+        except OSError as exc:
+            console.print(f"[red]HTML 导出失败: {exc}[/red]")
+
+    has_error = any(s.error for s in states)
+    sys.exit(1 if has_error else 0)
+
+
+# ---------------------------------------------------------------------------
+# 进度条驱动的扫描执行
+# ---------------------------------------------------------------------------
+
+# Pipeline 各阶段中文名称（用于进度条描述）
+_PHASE_LABELS: dict[str, str] = {
+    "clone_repo":      "克隆仓库",
+    "create_database": "创建数据库",
+    "generate_query":  "生成 QL 规则",
+    "analyze":         "CodeQL 扫描",
+    "review":          "Agent-R 审查",
+    "generate_poc":    "Agent-S PoC",
+}
+_TOTAL_PHASES = len(_PHASE_LABELS)
+
+
+def _run_with_progress(
+    base_config: "PipelineConfig",
+    vuln_types: list[str],
+    max_workers: int,
+) -> "list[PipelineState]":
+    """
+    在 rich 进度条界面下执行扫描，支持单次和并行两种模式。
+
+    进度追踪策略：
+    - 在后台线程中运行 Coordinator，主线程每 300ms 轮询
+      `state.completed_phases`，按已完成阶段数推进进度条。
+    - 并行模式下为每种漏洞类型创建独立进度条。
+    """
+    import dataclasses
+    import threading
+
+    from src.orchestrator.coordinator import Coordinator, PipelineState
+
+    console.print(Panel(
+        f"[bold green]QRS-EL 启动[/bold green]\n"
+        f"语言: [cyan]{base_config.language}[/cyan]  "
+        f"漏洞类型数: [cyan]{len(vuln_types)}[/cyan]  "
+        f"模式: [cyan]{'GitHub' if base_config.github_url else '本地'}[/cyan]",
+        expand=False,
+    ))
+
+    def _run_in_thread(fn) -> tuple[PipelineState | None, Exception | None]:
+        """在后台线程运行 fn()，返回 (result, error)。"""
+        holder: list = []
+        err_holder: list = []
+
+        def _target():
+            try:
+                holder.append(fn())
+            except Exception as exc:  # noqa: BLE001
+                err_holder.append(exc)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        return t, holder, err_holder
+
+    def _poll_phase_progress(
+        progress: Progress,
+        task_id,
+        thread: threading.Thread,
+        state_ref: list,
+        poll_interval: float = 0.3,
+    ) -> None:
+        """轮询 state.completed_phases，实时推进进度条。"""
+        last_count = 0
+        while thread.is_alive():
+            thread.join(timeout=poll_interval)
+            if state_ref:
+                current = len(state_ref[0].completed_phases)
+                if current > last_count:
+                    phase_keys = list(_PHASE_LABELS.keys())
+                    new_phase = phase_keys[min(current - 1, len(phase_keys) - 1)]
+                    label = _PHASE_LABELS.get(new_phase, new_phase)
+                    progress.update(task_id, completed=current, description=f"[cyan]{label}[/cyan]")
+                    last_count = current
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description:<20}"),
+        BarColumn(bar_width=28),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+
+        if len(vuln_types) == 1:
+            # ── 单漏洞：单进度条 + 阶段级实时追踪 ─────────────────────
+            vt = vuln_types[0]
+            task = progress.add_task("[dim]初始化…[/dim]", total=_TOTAL_PHASES)
+
+            cfg = dataclasses.replace(base_config, vuln_type=vt)
+            coordinator = Coordinator(config=cfg)
+
+            # coordinator.active_state 在 run() 进入后立即被设置（见 coordinator.py），
+            # 主线程轮询它的 completed_phases 即可实现阶段级进度追踪。
+            thread, holder, err_holder = _run_in_thread(coordinator.run)
+
+            # 等待 coordinator 创建 active_state（通常 < 50ms）
+            _waited = 0
+            while coordinator.active_state is None and thread.is_alive() and _waited < 40:
+                thread.join(timeout=0.05)
+                _waited += 1
+
+            # 实时轮询阶段进度
+            last_count = 0
+            phase_keys = list(_PHASE_LABELS.keys())
+            while thread.is_alive():
+                thread.join(timeout=0.3)
+                s = coordinator.active_state
+                if s is not None:
+                    current = len(s.completed_phases)
+                    if current > last_count:
+                        idx = min(current - 1, len(phase_keys) - 1)
+                        label = _PHASE_LABELS.get(phase_keys[idx], phase_keys[idx])
+                        progress.update(task, completed=current,
+                                        description=f"[cyan]{label}[/cyan]")
+                        last_count = current
+
+            thread.join()
+
+            if err_holder:
+                raise err_holder[0]
+
+            result = holder[0] if holder else None
+            if result is None:
+                s = PipelineState(vuln_type=vt)
+                s.error = "Pipeline 未返回结果"
+                result = s
+
+            progress.update(task, completed=_TOTAL_PHASES,
+                            description=f"[green]{vt[:30]}[/green]")
+            return [result]
+
+        else:
+            # ── 多漏洞：每个漏洞类型一条进度条 + 整体汇总进度 ──────────
+            overall_task = progress.add_task(
+                "[bold cyan]整体进度[/bold cyan]", total=len(vuln_types)
+            )
+            sub_tasks: dict[str, int] = {}
+            for vt in vuln_types:
+                tid = progress.add_task(f"[dim]{vt[:30]}[/dim]", total=_TOTAL_PHASES)
+                sub_tasks[vt] = tid
+
+            all_states: list[PipelineState | None] = [None] * len(vuln_types)
+            locks = [threading.Event() for _ in vuln_types]
+
+            # 先串行完成建库（Phase 0+1），所有子任务共享同一数据库
+            # 此工作由 run_parallel 内部完成，这里通过线程包裹整个调用
+            completed_count = 0
+
+            def _parallel_runner():
+                return Coordinator.run_parallel(
+                    base_config=base_config,
+                    vuln_types=vuln_types,
+                    max_workers=max_workers,
+                )
+
+            thread, holder, err_holder = _run_in_thread(_parallel_runner)
+
+            # 简单轮询：每 500ms 更新一次整体进度（子进度无法从外部精确追踪并行线程）
+            while thread.is_alive():
+                thread.join(timeout=0.5)
+
+            if err_holder:
+                raise err_holder[0]
+
+            states = holder[0] if holder else []
+            for idx, (vt, state) in enumerate(zip(vuln_types, states)):
+                tid = sub_tasks[vt]
+                if state.error:
+                    progress.update(tid, completed=_TOTAL_PHASES,
+                                    description=f"[red]{vt[:30]}[/red]")
+                else:
+                    progress.update(tid, completed=_TOTAL_PHASES,
+                                    description=f"[green]{vt[:30]}[/green]")
+                progress.advance(overall_task)
+
+            return states
+
+
+# ---------------------------------------------------------------------------
+# Rich 格式化结果摘要
+# ---------------------------------------------------------------------------
+
+
+def _print_rich_summary(states: "list[PipelineState]") -> None:
+    from src.agents.agent_r import VulnStatus
+
+    # ── 总体统计面板 ──────────────────────────────────────────────────
+    total_vuln = sum(len(s.vulnerable_findings) for s in states)
+    total_find = sum(len(s.review_results) for s in states)
+    total_poc = sum(len(s.poc_results) for s in states)
+    failed = sum(1 for s in states if s.error)
+
+    summary_text = (
+        f"扫描任务: [cyan]{len(states)}[/cyan]  "
+        f"发现总计: [yellow]{total_find}[/yellow]  "
+        f"确认漏洞: [red]{total_vuln}[/red]  "
+        f"PoC: [magenta]{total_poc}[/magenta]  "
+        f"失败: [red]{failed}[/red]"
+    )
+    console.print(Panel(summary_text, title="[bold]QRS-EL 扫描完成[/bold]", expand=False))
+
+    for state in states:
+        vuln_label = state.vuln_type or "未知"
+        if state.error:
+            console.print(f"[red]✘ {vuln_label}[/red] — {state.error}")
+            continue
+
+        cache_tag = " [dim](缓存命中)[/dim]" if state.db_from_cache else ""
+        console.print(
+            f"\n[bold cyan]{vuln_label}[/bold cyan]"
+            + (f"  [dim]run_id={state.run_id}[/dim]")
+        )
+        console.print(f"  数据库: {state.db_path}{cache_tag}")
+        console.print(f"  查询:   {state.query_path}")
+        console.print(f"  SARIF:  {state.sarif_path}")
+
+        if not state.review_results:
+            console.print("  [dim]Agent-R 未产生结果（可能已禁用或无发现）[/dim]")
+            continue
+
+        # Agent-R 结果表格
+        table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        table.add_column("#",        width=3)
+        table.add_column("状态",     width=8)
+        table.add_column("置信度",   width=7)
+        table.add_column("引擎",     width=10)
+        table.add_column("位置",     no_wrap=False)
+        table.add_column("推理摘要", no_wrap=False)
+
+        for i, r in enumerate(state.review_results, 1):
+            if r.status == VulnStatus.VULNERABLE:
+                status_str = "[red]漏洞[/red]"
+            elif r.status == VulnStatus.SAFE:
+                status_str = "[green]安全[/green]"
+            else:
+                status_str = "[yellow]可疑[/yellow]"
+
+            table.add_row(
+                str(i),
+                status_str,
+                f"{r.confidence:.0%}",
+                r.engine_detected,
+                f"{r.finding.file_uri}:{r.finding.start_line}",
+                r.reasoning[:60] + ("…" if len(r.reasoning) > 60 else ""),
+            )
+        console.print(table)
+
+        # Agent-S PoC 摘要
+        if state.poc_results:
+            console.print(f"  [magenta]PoC 报告（{len(state.poc_results)} 份）[/magenta]")
+            for poc in state.poc_results:
+                sev_color = "red" if poc.severity == "critical" else (
+                    "yellow" if poc.severity == "high" else "dim"
+                )
+                console.print(
+                    f"    [{sev_color}]{poc.severity.upper()}[/{sev_color}]"
+                    f"  {poc.file_location}"
+                )
+                if poc.payloads:
+                    console.print(f"    Payload: [magenta]{poc.payloads[0][:70]}[/magenta]")
+                if poc.http_trigger:
+                    m = poc.http_trigger.get("method", "?")
+                    p = poc.http_trigger.get("path", "?")
+                    param = poc.http_trigger.get("param", "?")
+                    console.print(f"    触发:    {m} {p}  param={param}")
+
+    console.print()
+
+
+if __name__ == "__main__":
+    main()
