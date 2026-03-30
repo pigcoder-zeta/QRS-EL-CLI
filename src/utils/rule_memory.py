@@ -125,11 +125,21 @@ class _ChromaBackend(_VectorBackend):
 
     def __init__(self, persist_dir: Path) -> None:
         import chromadb  # type: ignore
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
 
         persist_dir.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(persist_dir))
-        ef = SentenceTransformerEmbeddingFunction(model_name=_EMBED_MODEL)
+
+        # 优先使用 sentence-transformers 嵌入函数，
+        # 若未安装则回退到 ChromaDB 内置的 ONNX MiniLM 嵌入函数（无需额外依赖）
+        try:
+            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction  # type: ignore
+            ef: Any = SentenceTransformerEmbeddingFunction(model_name=_EMBED_MODEL)
+            logger.debug("[ChromaDB] 使用 SentenceTransformer 嵌入函数")
+        except (ImportError, ValueError):
+            from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # type: ignore
+            ef = DefaultEmbeddingFunction()
+            logger.debug("[ChromaDB] 使用内置 ONNX 嵌入函数（DefaultEmbeddingFunction）")
+
         self._col = self._client.get_or_create_collection(
             name="qrs_rule_memory",
             embedding_function=ef,
