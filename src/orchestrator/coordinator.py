@@ -252,16 +252,115 @@ class Coordinator:
         state.completed_phases.append("create_database")
         logger.info("[Phase 1] 数据库创建成功: %s", db_path)
 
+    @staticmethod
+    def _extract_sarif_context(sarif_path: str, repo_root: str) -> dict:
+        """
+        从 SARIF 文件提取漏洞链路上下文，用于丰富 RuleMemory 向量。
+
+        提取内容：
+          - data_flow_summary: Source → Sink 数据流路径的自然语言摘要
+          - sarif_message:     CodeQL 发现消息
+          - sink_method:       Sink 方法名（从消息中推断）
+          - code_snippet:      漏洞所在代码片段（前后各 5 行）
+
+        Args:
+            sarif_path: SARIF 文件路径。
+            repo_root:  源码根目录，用于读取代码片段。
+
+        Returns:
+            含以上字段的字典，缺失时值为空字符串。
+        """
+        import json as _json
+
+        ctx: dict = {
+            "data_flow_summary": "",
+            "sarif_message": "",
+            "sink_method": "",
+            "code_snippet": "",
+        }
+        try:
+            sarif = _json.loads(Path(sarif_path).read_text(encoding="utf-8"))
+        except Exception:
+            return ctx
+
+        runs = sarif.get("runs", [])
+        if not runs:
+            return ctx
+
+        results = runs[0].get("results", [])
+        if not results:
+            return ctx
+
+        # 取第一个发现（最具代表性）
+        first = results[0]
+        msg = first.get("message", {}).get("text", "")
+        ctx["sarif_message"] = msg[:500]
+
+        # 尝试从消息推断 Sink 方法（通常包含在 ` ` 或 [] 中）
+        import re
+        sink_match = re.search(r"`([A-Za-z0-9_.]+\([^`]{0,60}\))`", msg)
+        if sink_match:
+            ctx["sink_method"] = sink_match.group(1)
+
+        # 解析 codeFlows（数据流路径）
+        code_flows = first.get("codeFlows", [])
+        if code_flows:
+            thread_flows = code_flows[0].get("threadFlows", [])
+            if thread_flows:
+                steps = thread_flows[0].get("locations", [])
+                flow_parts = []
+                for step in steps:
+                    loc = step.get("location", {})
+                    phys = loc.get("physicalLocation", {})
+                    uri = phys.get("artifactLocation", {}).get("uri", "")
+                    region = phys.get("region", {})
+                    line = region.get("startLine", 0)
+                    step_msg = loc.get("message", {}).get("text", "")
+                    if uri:
+                        flow_parts.append(f"{uri}:{line} — {step_msg}")
+                if flow_parts:
+                    ctx["data_flow_summary"] = " → ".join(flow_parts[:8])  # 最多 8 步
+
+        # 读取漏洞位置的代码片段
+        locations = first.get("locations", [])
+        if locations:
+            phys = locations[0].get("physicalLocation", {})
+            uri = phys.get("artifactLocation", {}).get("uri", "")
+            region = phys.get("region", {})
+            start_line = region.get("startLine", 0)
+            if uri and start_line:
+                # CodeQL URI 通常以 "file:///..." 或相对路径表示
+                file_uri = uri.replace("file:///", "").replace("%20", " ")
+                candidates = [
+                    Path(repo_root) / file_uri,
+                    Path(file_uri),
+                ]
+                for fp in candidates:
+                    if fp.exists():
+                        try:
+                            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                            lo = max(0, start_line - 6)
+                            hi = min(len(lines), start_line + 5)
+                            ctx["code_snippet"] = "\n".join(
+                                f"{lo + i + 1:>4} | {lines[lo + i]}" for i in range(hi - lo)
+                            )
+                        except Exception:
+                            pass
+                        break
+
+        return ctx
+
     def _phase_generate_query(self, state: PipelineState) -> None:
         """Phase 2：Agent-Q 规则生成与编译（优先模板知识库 + 规则记忆 Few-Shot）。"""
         logger.info("[Phase 2] Agent-Q 生成规则 | 漏洞类型: %s", self.config.vuln_type)
 
-        # 从规则记忆库检索 Few-Shot 示例代码
+        # 从规则记忆库检索 Few-Shot 示例代码（语义检索含 Sink 提示）
         few_shot_examples: list[str] = []
         if self.rule_memory and self.rule_memory.count() > 0:
             hits = self.rule_memory.search(
                 language=self.config.language,
                 vuln_type=self.config.vuln_type,
+                sink_hint=self.config.sink_hints or "",
                 top_k=2,
             )
             for record, score in hits:
@@ -270,8 +369,8 @@ class Coordinator:
                         code = self.rule_memory.load_query_code(record)
                         few_shot_examples.append(code)
                         logger.info(
-                            "[Phase 2] 规则记忆命中 | 相似度: %.2f | %s",
-                            score, record.vuln_type,
+                            "[Phase 2] 规则记忆命中 | 相似度=%.2f | sink=%s | %s",
+                            score, record.sink_method or "N/A", record.vuln_type,
                         )
                     except FileNotFoundError:
                         pass
@@ -286,17 +385,6 @@ class Coordinator:
         state.query_path = str(query_file)
         state.completed_phases.append("generate_query")
         logger.info("[Phase 2] 规则就绪: %s", state.query_path)
-
-        # 归档到规则记忆库
-        if self.rule_memory and state.query_path:
-            try:
-                self.rule_memory.save(
-                    language=self.config.language,
-                    vuln_type=self.config.vuln_type,
-                    query_path=state.query_path,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[Phase 2] 规则归档失败: %s", exc)
 
     def _phase_analyze(self, state: PipelineState) -> None:
         """Phase 3：运行 CodeQL 扫描，输出 SARIF。"""
@@ -333,6 +421,37 @@ class Coordinator:
         state.sarif_path = sarif_path
         state.completed_phases.append("analyze")
         logger.info("[Phase 3] 扫描完成: %s", sarif_path)
+
+        # ── Phase 3.5：规则归档（携带 SARIF 漏洞链路上下文写入 RAG 记忆库）────
+        if self.rule_memory and state.query_path:
+            try:
+                from src.utils.vuln_catalog import find as _vuln_find
+                entry = _vuln_find(self.config.vuln_type)
+                cwe = entry.cwes[0] if entry and entry.cwes else ""
+
+                sarif_ctx = self._extract_sarif_context(
+                    sarif_path=sarif_path,
+                    repo_root=state.source_dir or "",
+                )
+                self.rule_memory.save(
+                    language=self.config.language,
+                    vuln_type=self.config.vuln_type,
+                    query_path=state.query_path,
+                    tags=list(state.detected_frameworks or []),
+                    sink_method=sarif_ctx["sink_method"],
+                    data_flow_summary=sarif_ctx["data_flow_summary"],
+                    sarif_message=sarif_ctx["sarif_message"],
+                    code_snippet=sarif_ctx["code_snippet"],
+                    cwe=cwe,
+                    detected_frameworks=list(state.detected_frameworks or []),
+                )
+                logger.info(
+                    "[Phase 3.5] 规则已归档到 RAG 记忆库 | sink=%s | backend=%s",
+                    sarif_ctx["sink_method"] or "N/A",
+                    self.rule_memory.get_backend_name(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Phase 3.5] 规则归档失败（不影响扫描结果）: %s", exc)
 
     def _phase_review(self, state: PipelineState) -> None:
         """Phase 4：Agent-R 语义审查，过滤误报。"""

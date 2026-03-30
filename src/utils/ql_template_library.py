@@ -398,40 +398,356 @@ select sink,
 )
 
 # ---------------------------------------------------------------------------
+# 通用漏洞模板
+# ---------------------------------------------------------------------------
+
+_JAVA_SQL_INJECTION = QLTemplate(
+    key="java/sql-injection",
+    language="java",
+    vuln_type="sql injection",
+    description="Java SQL 注入（JDBC Statement 字符串拼接）",
+    code="""\
+/**
+ * @name SQL Injection
+ * @description User-controlled data flows into a SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id java/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class SqlExecuteSink extends DataFlow::Node {
+  SqlExecuteSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.sql", "Statement", "executeQuery") or
+        mc.getMethod().hasQualifiedName("java.sql", "Statement", "execute") or
+        mc.getMethod().hasQualifiedName("java.sql", "Statement", "executeUpdate") or
+        mc.getMethod().hasQualifiedName("java.sql", "Connection", "prepareStatement") or
+        mc.getMethod().hasQualifiedName("org.springframework.jdbc.core", "JdbcTemplate", "queryForObject") or
+        mc.getMethod().hasQualifiedName("org.springframework.jdbc.core", "JdbcTemplate", "query")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlExecuteSink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_JAVA_COMMAND_INJECTION = QLTemplate(
+    key="java/command-injection",
+    language="java",
+    vuln_type="command injection",
+    description="Java 命令注入（Runtime.exec / ProcessBuilder）",
+    code="""\
+/**
+ * @name Command Injection
+ * @description User-controlled data flows into OS command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id java/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class CommandSink extends DataFlow::Node {
+  CommandSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.lang", "Runtime", "exec") or
+        mc.getMethod().hasQualifiedName("java.lang", "ProcessBuilder", "command")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CommandSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+_JAVA_PATH_TRAVERSAL = QLTemplate(
+    key="java/path-traversal",
+    language="java",
+    vuln_type="path traversal",
+    description="Java 路径穿越（FileInputStream / Paths.get）",
+    code="""\
+/**
+ * @name Path Traversal
+ * @description User-controlled path flows into file access without canonicalization.
+ * @kind problem
+ * @problem.severity error
+ * @id java/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class PathSink extends DataFlow::Node {
+  PathSink() {
+    exists(ConstructorCall cc |
+      (
+        cc.getConstructedType().hasQualifiedName("java.io", "FileInputStream") or
+        cc.getConstructedType().hasQualifiedName("java.io", "FileOutputStream") or
+        cc.getConstructedType().hasQualifiedName("java.io", "File")
+      ) and
+      this.asExpr() = cc.getArgument(0)
+    )
+    or
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.nio.file", "Paths", "get") or
+        mc.getMethod().hasQualifiedName("java.nio.file", "Files", "readAllBytes") or
+        mc.getMethod().hasQualifiedName("java.nio.file", "Files", "newInputStream")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof PathSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+_JAVA_SSRF = QLTemplate(
+    key="java/ssrf",
+    language="java",
+    vuln_type="ssrf",
+    description="Java 服务端请求伪造（URL.openConnection / RestTemplate）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (SSRF)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id java/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.net", "URL", "openConnection") or
+        mc.getMethod().hasQualifiedName("java.net", "URL", "openStream") or
+        mc.getMethod().hasQualifiedName("org.springframework.web.client", "RestTemplate", "getForObject") or
+        mc.getMethod().hasQualifiedName("org.springframework.web.client", "RestTemplate", "postForObject")
+      ) and
+      this.asExpr() = mc.getQualifier()
+    )
+    or
+    exists(ConstructorCall cc |
+      cc.getConstructedType().hasQualifiedName("java.net", "URL") and
+      this.asExpr() = cc.getArgument(0)
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+_PYTHON_SQL_INJECTION = QLTemplate(
+    key="python/sql-injection",
+    language="python",
+    vuln_type="sql injection",
+    description="Python SQL 注入（cursor.execute 字符串拼接）",
+    code="""\
+/**
+ * @name SQL Injection (Python)
+ * @description User-controlled data flows into SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id python/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class SqlSink extends DataFlow::Node {
+  SqlSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "execute" or
+        c.getFunc().(Attribute).getName() = "executemany"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlSink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_PYTHON_COMMAND_INJECTION = QLTemplate(
+    key="python/command-injection",
+    language="python",
+    vuln_type="command injection",
+    description="Python 命令注入（os.system / subprocess）",
+    code="""\
+/**
+ * @name Command Injection (Python)
+ * @description User-controlled data flows into OS command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id python/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class CommandSink extends DataFlow::Node {
+  CommandSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "system" or
+        c.getFunc().(Attribute).getName() = "popen" or
+        c.getFunc().(Attribute).getName() = "run" or
+        c.getFunc().(Attribute).getName() = "Popen" or
+        c.getFunc().(Attribute).getName() = "check_output" or
+        c.getFunc().(Name).getId() = "eval" or
+        c.getFunc().(Name).getId() = "exec"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CommandSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
 # 模板注册表
 # ---------------------------------------------------------------------------
 
 _ALL_TEMPLATES: list[QLTemplate] = [
-    # Java
+    # Java - 表达式注入
     _JAVA_SPEL,
     _JAVA_OGNL,
     _JAVA_MVEL,
     _JAVA_EL_COMBINED,
-    # Python
+    # Java - 通用
+    _JAVA_SQL_INJECTION,
+    _JAVA_COMMAND_INJECTION,
+    _JAVA_PATH_TRAVERSAL,
+    _JAVA_SSRF,
+    # Python - 模板注入
     _PYTHON_JINJA2,
     _PYTHON_MAKO,
     _PYTHON_SSTI_COMBINED,
+    # Python - 通用
+    _PYTHON_SQL_INJECTION,
+    _PYTHON_COMMAND_INJECTION,
 ]
 
 # 关键词 → 模板映射（优先精确匹配）
 _KEYWORD_MAP: dict[str, QLTemplate] = {
-    # Java
-    "spel":                 _JAVA_SPEL,
-    "spring el":            _JAVA_SPEL,
-    "spring expression":    _JAVA_SPEL,
-    "springel":             _JAVA_SPEL,
-    "ognl":                 _JAVA_OGNL,
-    "mvel":                 _JAVA_MVEL,
-    "el injection":         _JAVA_EL_COMBINED,
-    "el_injection":         _JAVA_EL_COMBINED,
-    "expression injection": _JAVA_EL_COMBINED,
+    # Java - EL
+    "spel":                         _JAVA_SPEL,
+    "spring el":                    _JAVA_SPEL,
+    "spring expression":            _JAVA_SPEL,
+    "spring el injection":          _JAVA_SPEL,
+    "ognl":                         _JAVA_OGNL,
+    "ognl injection":               _JAVA_OGNL,
+    "mvel":                         _JAVA_MVEL,
+    "mvel injection":               _JAVA_MVEL,
+    "el injection":                 _JAVA_EL_COMBINED,
+    "expression injection":         _JAVA_EL_COMBINED,
+    # Java - 通用
+    "sql injection":                _JAVA_SQL_INJECTION,
+    "sql":                          _JAVA_SQL_INJECTION,
+    "sqli":                         _JAVA_SQL_INJECTION,
+    "command injection":            _JAVA_COMMAND_INJECTION,
+    "os command":                   _JAVA_COMMAND_INJECTION,
+    "rce":                          _JAVA_COMMAND_INJECTION,
+    "path traversal":               _JAVA_PATH_TRAVERSAL,
+    "directory traversal":          _JAVA_PATH_TRAVERSAL,
+    "lfi":                          _JAVA_PATH_TRAVERSAL,
+    "ssrf":                         _JAVA_SSRF,
+    "server-side request forgery":  _JAVA_SSRF,
+    "server side request forgery":  _JAVA_SSRF,
     # Python
-    "jinja2":               _PYTHON_JINJA2,
-    "jinja":                _PYTHON_JINJA2,
-    "mako":                 _PYTHON_MAKO,
-    "ssti":                 _PYTHON_SSTI_COMBINED,
-    "template injection":   _PYTHON_SSTI_COMBINED,
-    "server-side template": _PYTHON_SSTI_COMBINED,
+    "jinja2":                       _PYTHON_JINJA2,
+    "jinja":                        _PYTHON_JINJA2,
+    "mako":                         _PYTHON_MAKO,
+    "ssti":                         _PYTHON_SSTI_COMBINED,
+    "template injection":           _PYTHON_SSTI_COMBINED,
+    "server-side template":         _PYTHON_SSTI_COMBINED,
 }
 
 

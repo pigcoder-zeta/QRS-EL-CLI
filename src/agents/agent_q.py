@@ -23,6 +23,7 @@ from langchain_openai import ChatOpenAI
 
 from src.utils.codeql_runner import CodeQLRunner
 from src.utils.ql_template_library import QLTemplateLibrary
+from src.utils import vuln_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ MAX_RETRIES: int = 3
 
 # 按语言选择对应系统提示
 _SYSTEM_PROMPT_JAVA = """\
-你是一位精通 CodeQL 静态分析的安全研究专家，专注于 Java 表达式注入漏洞（SpEL / OGNL / MVEL）检测。
+你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 Java 安全漏洞（SQL注入、命令注入、路径穿越、SSRF、反序列化、表达式注入等）。
 你的输出必须是合法的、可以被 `codeql query compile` 编译通过的 .ql 源代码，且只输出代码本身，
 不要附带任何 markdown 代码块标记（如 ```ql）、解释或注释以外的文字。
 
@@ -83,7 +84,7 @@ select sink, "漏洞描述，数据来自 $@。", source, "用户可控输入"
 """
 
 _SYSTEM_PROMPT_PYTHON = """\
-你是一位精通 CodeQL 静态分析的安全研究专家，专注于 Python SSTI 漏洞（Jinja2 / Mako）检测。
+你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 Python 安全漏洞（SQL注入、命令注入、模板注入SSTI、路径穿越、不安全反序列化等）。
 你的输出必须是合法的、可以被 `codeql query compile` 编译通过的 .ql 源代码，且只输出代码本身，
 不要附带任何 markdown 代码块标记（如 ```ql）、解释或注释以外的文字。
 
@@ -395,8 +396,11 @@ class AgentQ:
         Raises:
             RuntimeError: 当达到最大重试次数后仍无法通过编译时抛出。
         """
-        _sink_hints = sink_hints or _DEFAULT_SINK_HINTS.get(
-            language.lower(), "（未指定，请根据目标框架推断）"
+        # 优先使用用户指定的 sink_hints，其次从通用漏洞目录查询，最后用语言默认值
+        _sink_hints = (
+            sink_hints
+            or vuln_catalog.get_sink_hints(vuln_type, language)
+            or _DEFAULT_SINK_HINTS.get(language.lower(), "（未指定，请根据目标框架推断）")
         )
         _name_prefix = query_name or f"{language}_{vuln_type}".replace(" ", "_")
         _filename = f"{_name_prefix}_{uuid.uuid4().hex[:8]}.ql"

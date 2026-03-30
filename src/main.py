@@ -199,7 +199,7 @@ def _run_check() -> None:
         f"已设置（...{api_key[-6:]}）" if key_ok else "未设置（需在 .env 中配置）",
     ))
 
-    # Python 包检查
+    # Python 包检查（核心包）
     for pkg, import_name in [
         ("langchain-openai", "langchain_openai"),
         ("GitPython",        "git"),
@@ -211,6 +211,21 @@ def _run_check() -> None:
             checks.append((f"  pkg: {pkg}", True, "已安装"))
         except ImportError:
             checks.append((f"  pkg: {pkg}", False, "未安装（pip install " + pkg + "）"))
+
+    # RAG 向量后端检查（可选，自动降级）
+    rag_backend_name = "tfidf（默认回退）"
+    for rag_pkg, rag_import, rag_label in [
+        ("chromadb",              "chromadb",             "ChromaDB"),
+        ("faiss-cpu",             "faiss",                "FAISS"),
+        ("sentence-transformers", "sentence_transformers","sentence-transformers"),
+    ]:
+        try:
+            __import__(rag_import)
+            rag_backend_name = rag_label
+            break  # 找到最优后端即停止
+        except ImportError:
+            pass
+    checks.append(("  RAG 向量后端", True, f"当前最优: {rag_backend_name}（可 pip install chromadb 升级）"))
 
     # data 目录
     for d in ["data/databases", "data/queries", "data/results", "data/rule_memory"]:
@@ -246,10 +261,192 @@ def _run_check() -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # 显示规则记忆库统计
+    try:
+        from src.utils.rule_memory import RuleMemory
+        mem = RuleMemory()
+        count = mem.count()
+        backend = mem.get_backend_name()
+        if count > 0:
+            console.print(
+                f"  [dim]规则记忆库: {count} 条规则已归档 | "
+                f"向量后端: [bold]{backend}[/bold][/dim]"
+            )
+        else:
+            console.print(
+                f"  [dim]规则记忆库: 空（首次扫描成功后自动填充）| "
+                f"向量后端: [bold]{backend}[/bold][/dim]"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     if all_pass:
         console.print("[bold green]所有检查通过，环境就绪！[/bold green]")
     else:
         console.print("[bold red]部分检查未通过，请按提示修复后再运行扫描。[/bold red]")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# 规则记忆库管理命令
+# ---------------------------------------------------------------------------
+
+
+def _show_memory(memory_dir: str = "data/rule_memory") -> None:
+    """展示规则记忆库中所有已归档的规则。"""
+    from src.utils.rule_memory import RuleMemory
+
+    mem = RuleMemory(memory_dir=memory_dir)
+    console.print(
+        Panel(
+            f"[bold cyan]QRS-EL 规则记忆库[/bold cyan]  "
+            f"[dim]共 {mem.count()} 条规则 | 向量后端: {mem.get_backend_name()}[/dim]",
+            expand=False,
+        )
+    )
+
+    if mem.count() == 0:
+        console.print("[dim]记忆库为空。完成第一次成功扫描后规则将自动归档。[/dim]")
+        return
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta", expand=True)
+    table.add_column("#",         style="dim",   width=4,  no_wrap=True)
+    table.add_column("语言",       style="cyan",  width=8,  no_wrap=True)
+    table.add_column("漏洞类型",   style="yellow", width=22, no_wrap=True)
+    table.add_column("Sink 方法",  style="green",  width=28, no_wrap=True)
+    table.add_column("数据流摘要", style="dim",    min_width=20)
+    table.add_column("CWE",        style="red",   width=9,  no_wrap=True)
+    table.add_column("归档时间",   style="dim",   width=20, no_wrap=True)
+
+    for i, record in enumerate(mem._records.values(), 1):
+        flow = record.data_flow_summary
+        if len(flow) > 60:
+            flow = flow[:57] + "..."
+        table.add_row(
+            str(i),
+            record.language,
+            record.vuln_type,
+            record.sink_method or "—",
+            flow or "—",
+            record.cwe or "—",
+            record.created_at[:16].replace("T", " "),
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]规则文件目录: {memory_dir}/rules/  "
+        f"索引文件: {memory_dir}/rule_memory_index.json[/dim]"
+    )
+
+
+def _search_memory(query: str, memory_dir: str = "data/rule_memory") -> None:
+    """
+    对规则记忆库执行语义搜索。
+
+    查询格式示例：
+      "SQL Injection java"
+      "命令注入 python eval"
+    """
+    from src.utils.rule_memory import RuleMemory
+
+    mem = RuleMemory(memory_dir=memory_dir)
+    console.print(
+        Panel(
+            f"[bold cyan]语义搜索规则记忆库[/bold cyan]  "
+            f"[dim]查询: \"{query}\" | 后端: {mem.get_backend_name()}[/dim]",
+            expand=False,
+        )
+    )
+
+    if mem.count() == 0:
+        console.print("[dim]记忆库为空，无可搜索内容。[/dim]")
+        return
+
+    # 从查询中推断语言
+    lang_tokens = {"java", "python", "javascript", "go", "csharp", "cpp"}
+    detected_lang = ""
+    for tok in query.lower().split():
+        if tok in lang_tokens:
+            detected_lang = tok
+            break
+
+    results = mem.search(
+        language=detected_lang,
+        vuln_type=query,
+        top_k=5,
+    )
+
+    if not results:
+        console.print("[yellow]未找到匹配规则。[/yellow]")
+        return
+
+    console.print(f"找到 [bold]{len(results)}[/bold] 条相似规则：\n")
+    for rank, (record, score) in enumerate(results, 1):
+        score_color = "green" if score > 0.7 else "yellow" if score > 0.4 else "dim"
+        console.print(
+            f"  [{rank}] [{score_color}]相似度 {score:.2%}[/{score_color}]  "
+            f"[cyan]{record.language}[/cyan] / [yellow]{record.vuln_type}[/yellow]"
+        )
+        if record.sink_method:
+            console.print(f"       Sink: [green]{record.sink_method}[/green]")
+        if record.data_flow_summary:
+            summary = record.data_flow_summary[:100] + ("..." if len(record.data_flow_summary) > 100 else "")
+            console.print(f"       数据流: [dim]{summary}[/dim]")
+        if record.cwe:
+            console.print(f"       CWE: [red]{record.cwe}[/red]")
+        console.print(f"       文件: [dim]{record.query_path}[/dim]\n")
+
+
+def _clear_memory(memory_dir: str = "data/rule_memory") -> None:
+    """清空规则记忆库（需要用户二次确认）。"""
+    import shutil as _shutil
+
+    mem_path = Path(memory_dir)
+    if not mem_path.exists():
+        console.print("[dim]规则记忆库目录不存在，无需清空。[/dim]")
+        return
+
+    console.print(
+        f"[bold red]警告：即将删除规则记忆库目录 {memory_dir} 及其所有内容！[/bold red]"
+    )
+    confirm = console.input("确认清空？输入 [bold]yes[/bold] 继续，其他任意键取消: ")
+    if confirm.strip().lower() != "yes":
+        console.print("[dim]已取消。[/dim]")
+        return
+
+    _shutil.rmtree(mem_path, ignore_errors=True)
+    console.print("[green]规则记忆库已清空。[/green]")
+
+
+def _export_memory(output_path: str, memory_dir: str = "data/rule_memory") -> None:
+    """将规则记忆库打包为 ZIP Bundle。"""
+    from src.utils.rule_memory import RuleMemory
+
+    mem = RuleMemory(memory_dir=memory_dir)
+    if mem.count() == 0:
+        console.print("[yellow]规则记忆库为空，无需导出。[/yellow]")
+        return
+
+    out = mem.export_bundle(output_path)
+    console.print(
+        f"[green]导出成功！[/green] 共 [bold]{mem.count()}[/bold] 条规则 → [cyan]{out}[/cyan]"
+    )
+    console.print("[dim]可在其他机器上使用 --import-memory 导入此 Bundle。[/dim]")
+
+
+def _import_memory(bundle_path: str, memory_dir: str = "data/rule_memory") -> None:
+    """从 ZIP Bundle 导入规则记忆库（合并模式）。"""
+    from src.utils.rule_memory import RuleMemory
+
+    mem = RuleMemory(memory_dir=memory_dir)
+    try:
+        count = mem.import_bundle(bundle_path, merge=True)
+        console.print(
+            f"[green]导入成功！[/green] 新增 [bold]{count}[/bold] 条规则，"
+            f"库中共 [bold]{mem.count()}[/bold] 条。"
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]错误：{exc}[/red]")
         sys.exit(1)
 
 
@@ -347,6 +544,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--openai-api-key", default=None, metavar="KEY")
     parser.add_argument("--verbose", action="store_true")
 
+    # ── 规则记忆库管理 ────────────────────────────────────────────────
+    parser.add_argument(
+        "--show-memory",
+        action="store_true",
+        help="展示规则记忆库中所有已归档的规则（含漏洞链路摘要）",
+    )
+    parser.add_argument(
+        "--search-memory",
+        metavar="QUERY",
+        default=None,
+        help='语义搜索规则记忆库，如 --search-memory "SQL Injection java"',
+    )
+    parser.add_argument(
+        "--clear-memory",
+        action="store_true",
+        help="清空规则记忆库（谨慎使用，将删除所有已归档规则）",
+    )
+    parser.add_argument(
+        "--export-memory",
+        metavar="PATH",
+        default=None,
+        help="将规则记忆库导出为 ZIP Bundle（如 data/memory_bundle.zip）",
+    )
+    parser.add_argument(
+        "--import-memory",
+        metavar="PATH",
+        default=None,
+        help="从 ZIP Bundle 导入规则记忆库（默认合并模式）",
+    )
+
     return parser
 
 
@@ -369,6 +596,31 @@ def main() -> None:
     # ── 列出模板 ──────────────────────────────────────────────────────
     if args.list_templates:
         _list_templates()
+        return
+
+    # ── 规则记忆库：展示所有规则 ──────────────────────────────────────
+    if args.show_memory:
+        _show_memory(args.rule_memory_dir)
+        return
+
+    # ── 规则记忆库：语义搜索 ──────────────────────────────────────────
+    if args.search_memory:
+        _search_memory(args.search_memory, args.rule_memory_dir)
+        return
+
+    # ── 规则记忆库：清空 ──────────────────────────────────────────────
+    if args.clear_memory:
+        _clear_memory(args.rule_memory_dir)
+        return
+
+    # ── 规则记忆库：导出 Bundle ───────────────────────────────────────
+    if args.export_memory:
+        _export_memory(args.export_memory, args.rule_memory_dir)
+        return
+
+    # ── 规则记忆库：导入 Bundle ───────────────────────────────────────
+    if args.import_memory:
+        _import_memory(args.import_memory, args.rule_memory_dir)
         return
 
     # ── YAML 配置文件（优先级低于 CLI 参数）──────────────────────────
