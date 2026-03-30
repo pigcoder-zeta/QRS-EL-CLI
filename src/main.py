@@ -536,6 +536,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-cleanup", action="store_true")
     parser.add_argument("--no-agent-r", action="store_true")
     parser.add_argument("--no-agent-s", action="store_true")
+    parser.add_argument("--no-agent-e", action="store_true",
+                        help="禁用 Agent-E 动态沙箱验证（默认开启）")
+    parser.add_argument(
+        "--agent-e-host", default=None, metavar="URL",
+        help="已运行目标的地址（如 http://localhost:8080），使用 Remote 模式而非 Docker 沙箱",
+    )
     parser.add_argument("--no-rule-memory", action="store_true")
     parser.add_argument(
         "--no-build", action="store_true",
@@ -682,6 +688,8 @@ def main() -> None:
         enable_agent_s=not args.no_agent_s,
         enable_rule_memory=not args.no_rule_memory,
         build_mode="none" if args.no_build else "",
+        enable_agent_e=not args.no_agent_e,
+        agent_e_host=getattr(args, "agent_e_host", None),
     )
 
     import time
@@ -921,14 +929,20 @@ def _print_rich_summary(states: "list[PipelineState]") -> None:
     total_vuln = sum(len(s.vulnerable_findings) for s in states)
     total_find = sum(len(s.review_results) for s in states)
     total_poc = sum(len(s.poc_results) for s in states)
+    total_dyn_confirmed = sum(len(s.confirmed_poc_results) for s in states)
     failed = sum(1 for s in states if s.error)
 
+    dyn_label = (
+        f"  动态确认: [bold green]{total_dyn_confirmed}[/bold green]"
+        if total_poc > 0 else ""
+    )
     summary_text = (
         f"扫描任务: [cyan]{len(states)}[/cyan]  "
         f"发现总计: [yellow]{total_find}[/yellow]  "
-        f"确认漏洞: [red]{total_vuln}[/red]  "
-        f"PoC: [magenta]{total_poc}[/magenta]  "
-        f"失败: [red]{failed}[/red]"
+        f"LLM确认: [red]{total_vuln}[/red]  "
+        f"PoC: [magenta]{total_poc}[/magenta]"
+        + dyn_label +
+        f"  失败: [red]{failed}[/red]"
     )
     console.print(Panel(summary_text, title="[bold]QRS-EL 扫描完成[/bold]", expand=False))
 
@@ -978,16 +992,31 @@ def _print_rich_summary(states: "list[PipelineState]") -> None:
             )
         console.print(table)
 
-        # Agent-S PoC 摘要
+        # Agent-S PoC + Agent-E 验证摘要
         if state.poc_results:
             console.print(f"  [magenta]PoC 报告（{len(state.poc_results)} 份）[/magenta]")
             for poc in state.poc_results:
                 sev_color = "red" if poc.severity == "critical" else (
                     "yellow" if poc.severity == "high" else "dim"
                 )
+                # Agent-E 动态验证结果标记
+                vr = poc.verification_result
+                if vr is not None and hasattr(vr, "status"):
+                    from src.agents.agent_e import VerificationStatus as _VS
+                    if vr.status == _VS.CONFIRMED:
+                        dyn_tag = " [bold green]✅ 动态验证 100% 确认[/bold green]"
+                    elif vr.status == _VS.UNCONFIRMED:
+                        dyn_tag = " [yellow]⚠ 动态验证未命中[/yellow]"
+                    elif vr.status == _VS.SKIPPED:
+                        dyn_tag = " [dim]（跳过动态验证）[/dim]"
+                    else:
+                        dyn_tag = " [red]（验证出错）[/red]"
+                else:
+                    dyn_tag = ""
+
                 console.print(
                     f"    [{sev_color}]{poc.severity.upper()}[/{sev_color}]"
-                    f"  {poc.file_location}"
+                    f"  {poc.file_location}{dyn_tag}"
                 )
                 if poc.payloads:
                     console.print(f"    Payload: [magenta]{poc.payloads[0][:70]}[/magenta]")
@@ -996,6 +1025,8 @@ def _print_rich_summary(states: "list[PipelineState]") -> None:
                     p = poc.http_trigger.get("path", "?")
                     param = poc.http_trigger.get("param", "?")
                     console.print(f"    触发:    {m} {p}  param={param}")
+                if vr is not None and hasattr(vr, "evidence") and vr.evidence:
+                    console.print(f"    证据:    [green]{vr.evidence[:100]}[/green]")
 
     console.print()
 

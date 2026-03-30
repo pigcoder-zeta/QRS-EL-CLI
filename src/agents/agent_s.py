@@ -21,6 +21,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+from __future__ import annotations as _annotations  # noqa: F401 – 允许前向引用
+
 from src.agents.agent_r import ReviewResult
 
 logger = logging.getLogger(__name__)
@@ -169,14 +171,15 @@ class PoCResult:
     Agent-S 生成的 PoC 输出结构。
 
     Attributes:
-        engine: 检测到的 EL 引擎（如 Spring EL）。
-        sink_method: 触发漏洞的 Sink 方法全名。
-        file_location: 漏洞所在文件和行号。
-        payloads: 候选 Payload 列表（由低到高危）。
-        http_trigger: HTTP 请求触发步骤（Method / URL / 参数名 / 示例 Body）。
-        expected_output: 成功利用时的预期回显特征。
-        severity: 风险等级（critical / high / medium）。
-        raw_llm_output: LLM 原始输出，供调试用。
+        engine:              检测到的引擎或漏洞类别（如 OGNL / SQL Injection）。
+        sink_method:         触发漏洞的 Sink 方法全名。
+        file_location:       漏洞所在文件和行号。
+        payloads:            候选 Payload 列表（由低到高危）。
+        http_trigger:        HTTP 请求触发步骤（Method / path / param / example）。
+        expected_output:     成功利用时的预期回显特征。
+        severity:            风险等级（critical / high / medium）。
+        raw_llm_output:      LLM 原始输出，供调试用。
+        verification_result: Agent-E 动态验证结果（可选，验证后填充）。
     """
 
     engine: str
@@ -187,9 +190,11 @@ class PoCResult:
     expected_output: str = ""
     severity: str = "high"
     raw_llm_output: str = ""
+    # Agent-E 填充（扫描时延迟注入，避免循环导入）
+    verification_result: Optional[object] = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "engine": self.engine,
             "sink_method": self.sink_method,
             "file_location": self.file_location,
@@ -198,9 +203,22 @@ class PoCResult:
             "expected_output": self.expected_output,
             "severity": self.severity,
         }
+        if self.verification_result is not None:
+            vr = self.verification_result
+            if hasattr(vr, "to_dict"):
+                d["verification"] = vr.to_dict()  # type: ignore[union-attr]
+        return d
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+    @property
+    def is_dynamically_confirmed(self) -> bool:
+        """Agent-E 是否已将此 PoC 标记为 100% 确认真实漏洞。"""
+        vr = self.verification_result
+        if vr is None:
+            return False
+        return getattr(vr, "is_confirmed", False)
 
 
 # ---------------------------------------------------------------------------

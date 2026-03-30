@@ -6,8 +6,9 @@ Pipeline 阶段：
   Phase 1: 创建 CodeQL 数据库（命中缓存时跳过）
   Phase 2: Agent-Q 规则生成与编译（优先模板知识库 + 规则记忆库 Few-Shot）
   Phase 3: CodeQL 扫描，输出 SARIF
-  Phase 4: Agent-R 语义审查，过滤误报
-  Phase 5: Agent-S PoC 生成（仅对确认漏洞执行）
+  Phase 4: Agent-R 语义审查，过滤误报（LLM 概率判断）
+  Phase 5: Agent-S PoC 生成（针对确认漏洞生成 HTTP 载荷）
+  Phase 6: Agent-E 动态沙箱验证（Docker/Remote 执行 PoC，升级为 100%% 确认）
 
 扩展能力：
   - run_parallel()：多漏洞类型并行扫描，利用 ThreadPoolExecutor
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from src.agents.agent_e import AgentE, VerificationResult, VerificationStatus
 from src.agents.agent_q import AgentQ
 from src.agents.agent_r import AgentR, ReviewResult, VulnStatus
 from src.agents.agent_s import AgentS, PoCResult
@@ -83,6 +85,8 @@ class PipelineConfig:
     enable_agent_s: bool = True
     enable_rule_memory: bool = True
     build_mode: str = ""   # "none" = 跳过编译直接做源码提取（适合构建环境不完整时）
+    enable_agent_e: bool = True   # 是否启用 Agent-E 动态沙箱验证
+    agent_e_host: Optional[str] = None   # 已运行目标地址（如 http://localhost:8080）
 
     def __post_init__(self) -> None:
         if not self.source_dir and not self.github_url:
@@ -118,6 +122,7 @@ class PipelineState:
     sarif_path: Optional[str] = None
     review_results: list[ReviewResult] = field(default_factory=list)
     poc_results: list[PoCResult] = field(default_factory=list)
+    verification_results: list[VerificationResult] = field(default_factory=list)
     completed_phases: list[str] = field(default_factory=list)
     error: Optional[str] = None                 # 非空时表示该次扫描失败
 
@@ -125,6 +130,11 @@ class PipelineState:
     def vulnerable_findings(self) -> list[ReviewResult]:
         """返回 Agent-R 判定为真实漏洞的发现列表。"""
         return [r for r in self.review_results if r.status == VulnStatus.VULNERABLE]
+
+    @property
+    def confirmed_poc_results(self) -> list[PoCResult]:
+        """返回经 Agent-E 动态验证确认的 PoC 列表。"""
+        return [p for p in self.poc_results if p.is_dynamically_confirmed]
 
     @property
     def success(self) -> bool:
@@ -163,6 +173,10 @@ class Coordinator:
         )
         self.agent_r = agent_r or AgentR()
         self.agent_s = agent_s or AgentS()
+        self.agent_e = AgentE(
+            target_host=config.agent_e_host,
+            enable_docker=config.enable_agent_e,
+        )
         self.repo_manager = repo_manager or GithubRepoManager()
         self.db_cache = DatabaseCache(db_base_dir=config.db_base_dir)
         self.rule_memory = (
@@ -505,6 +519,57 @@ class Coordinator:
         state.completed_phases.append("generate_poc")
         logger.info("[Phase 5] PoC 生成完成 | 共 %d 份", len(poc_results))
 
+    def _phase_verify(self, state: PipelineState) -> None:
+        """Phase 6：Agent-E 动态沙箱验证——将 LLM 概率判断升级为运行时确认。"""
+        if not self.config.enable_agent_e:
+            logger.info("[Phase 6] Agent-E 已禁用，跳过动态验证。")
+            return
+
+        if not state.poc_results:
+            logger.info("[Phase 6] 无 PoC 需要验证，跳过动态验证。")
+            return
+
+        logger.info(
+            "[Phase 6] Agent-E 开始动态验证 | PoC 数: %d | 模式: %s",
+            len(state.poc_results),
+            "Remote" if self.config.agent_e_host else "Docker（沙箱）",
+        )
+
+        verification_results: list[VerificationResult] = []
+        confirmed_count = 0
+
+        for poc in state.poc_results:
+            vr = self.agent_e.verify(
+                poc=poc,
+                vuln_type=self.config.vuln_type,
+                repo_path=state.source_dir or "",
+            )
+            verification_results.append(vr)
+            poc.verification_result = vr   # 注入回 PoC 对象
+
+            if vr.is_confirmed:
+                confirmed_count += 1
+                logger.info(
+                    "[Phase 6] ✅ 100%% 确认真实漏洞 | %s | 证据: %s",
+                    poc.file_location,
+                    vr.evidence[:80] if vr.evidence else "（LLM 分析确认）",
+                )
+            else:
+                logger.info(
+                    "[Phase 6] ⚠ 未能动态确认 | %s | 状态: %s | 原因: %s",
+                    poc.file_location,
+                    vr.status.value,
+                    vr.reason[:80],
+                )
+
+        state.verification_results = verification_results
+        state.completed_phases.append("verify")
+        logger.info(
+            "[Phase 6] 动态验证完成 | 确认: %d/%d | 后端: %s",
+            confirmed_count, len(state.poc_results),
+            "Docker" if not self.config.agent_e_host else "Remote",
+        )
+
     def _cleanup_clone(self, state: PipelineState) -> None:
         """（GitHub 模式）清理克隆的临时目录。"""
         if not self.config.cleanup_workspace or not state.cloned_repo_path:
@@ -546,6 +611,7 @@ class Coordinator:
             self._phase_analyze(state)
             self._phase_review(state)
             self._phase_generate_poc(state)
+            self._phase_verify(state)
 
         except Exception as exc:  # noqa: BLE001
             state.error = str(exc)
@@ -554,10 +620,12 @@ class Coordinator:
             if self.config.github_url:
                 self._cleanup_clone(state)
 
+        dyn_confirmed = len(state.confirmed_poc_results)
         logger.info(
-            "=== Pipeline 完成 | 阶段: [%s] | 确认漏洞: %d 处 ===",
+            "=== Pipeline 完成 | 阶段: [%s] | LLM确认漏洞: %d | 动态验证确认: %d ===",
             ", ".join(state.completed_phases),
             len(state.vulnerable_findings),
+            dyn_confirmed,
         )
         return state
 
@@ -606,9 +674,10 @@ class Coordinator:
             self._phase_analyze(state)
             self._phase_review(state)
             self._phase_generate_poc(state)
+            self._phase_verify(state)
         except Exception as exc:  # noqa: BLE001
             state.error = str(exc)
-            logger.error("[%s] Phase 2-5 失败: %s", self.config.vuln_type, exc)
+            logger.error("[%s] Phase 2-6 失败: %s", self.config.vuln_type, exc)
 
         return state
 
