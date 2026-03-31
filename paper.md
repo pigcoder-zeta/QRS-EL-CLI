@@ -14,7 +14,7 @@
 
 静态应用安全测试（SAST）长期面临两大核心矛盾：规则编写门槛高（需要掌握目标语言与查询语言）和误报率居高不下（纯符号方法缺乏语义理解）。2026年的一项研究《QRS: A Rule-Synthesizing Neuro-Symbolic Triad for Autonomous Vulnerability Discovery》（arXiv:2602.09774）提出了一种融合大语言模型（LLM）与 CodeQL 引擎的三节点（Query、Review、Sanitize）协同框架，在 Python 生态中取得了显著成果。
 
-本文在其思想启发下，设计并实现了更具工程普适性的 **QRS-X 系统**。我们在原论文的三智能体基础上，扩展并演进了四个功能专一的智能体：**Agent-Q**（自修复规则合成器）、**Agent-R**（语义感知审查器）、**Agent-S**（PoC 载荷生成器）和 **Agent-E**（动态沙箱执行器）。该系统不仅将检测范围扩展到涵盖 Java 和 Python 的 12 类通用高危漏洞，还在以下方面取得了工程与架构上的创新：（1）实现"黄金模板优先+编译自修复"的闭环，大幅提升规则编译成功率；（2）引入 ChromaDB/FAISS 构建漏洞利用链路级的 RAG 记忆检索；（3）通过 Docker 沙箱实现 100% 动态确认闭环；（4）实现大型项目的"建库一次、多漏洞并行扫描"策略。
+本文在其思想启发下，设计并实现了更具工程普适性的 **QRS-X 系统**。我们在原论文的三智能体基础上，扩展并演进了四个功能专一的智能体：**Agent-Q**（自修复规则合成器）、**Agent-R**（语义感知审查器）、**Agent-S**（PoC 载荷生成器）和 **Agent-E**（动态沙箱执行器）。该系统不仅将检测范围扩展到涵盖 Java 和 Python 的 **14 类**通用高危漏洞，还在以下方面取得了工程与架构上的创新：（1）实现"黄金模板优先+编译自修复"的闭环，将规则编译成功率大幅提升（工程实践估算，有效避免了 LLM 直接生成的高失败率）；（2）引入 ChromaDB/FAISS 构建漏洞利用链路级的 RAG 记忆检索；（3）通过 Docker 沙箱（需目标仓库含 `Dockerfile`）实现动态运行时确认闭环；（4）实现大型项目的"建库一次、多漏洞并行扫描"策略（并通过类级 `threading.Lock` 解决 CodeQL IMB 缓存并发锁问题）。
 
 **关键词**：静态应用安全测试；大语言模型；CodeQL；多智能体系统；漏洞检测；神经符号融合；RAG；动态验证
 
@@ -38,8 +38,8 @@
 1. **四 Agent 扩展架构**：将原论文的 S 节点拆分升级为 Agent-S（PoC 文本生成）与 Agent-E（自动化 Docker 沙箱执行），实现"SAST 静态检出 → LLM 语义推断 → 真实靶机 HTTP 验证"全自动闭环。
 2. **带编译自修复的模板合成**：引入"黄金模板库（QLTemplateLibrary）+ 编译器 stderr 错误反馈循环"，将规则首次运行成功率从不足 30% 提升至 95% 以上。
 3. **漏洞利用链路级 RAG**：引入完整向量数据库（支持 ChromaDB 等5级后端降级），将 Sink 方法、Source-Sink 数据流摘要、代码片段整合为富文本 Embedding，实现"漏洞经验记忆池"。
-4. **多语言与通用漏洞支持**：原生支持 Java 与 Python，内置 12 大类漏洞（SQLi、SSRF、命令注入、表达式注入等）完整知识库与专有 Payload 策略。
-5. **企业级性能优化**：基于 Git Commit Hash 的数据库增量缓存，多漏洞类型并行扫描（建库唯一一次，多线程并发调度，IMB 缓存锁通过类级 `threading.Lock` 串行化解决）。
+4. **多语言与通用漏洞支持**：原生支持 Java 与 Python，内置 **14 大类漏洞**（Spring EL、OGNL、MVEL、SQL 注入、命令注入、路径穿越、XSS、SSRF、XXE、反序列化、SSTI、弱加密、日志注入、开放重定向）的完整知识库与专有 Payload 策略（约 15 种 Payload 模板）。
+5. **企业级性能优化**：基于 Git Commit Hash 的数据库增量缓存，多漏洞类型并行扫描（建库唯一一次，多线程并发调度），并通过类级 `threading.Lock` 串行化 `codeql database analyze`，解决 `OverlappingFileLockException` 并发锁冲突。
 
 ---
 
@@ -113,8 +113,8 @@ HTML + JSON + CLI 报告
 
 **原论文机制**：Sanitize (S) 节点执行环境隔离与最终评估。  
 **QRS-X 演进**：拆分为两个物理阶段：
-1. **Agent-S**：20+ 漏洞专属 Payload 库（SpEL、OGNL、Pickle 等）+ LLM 参数推断，生成格式化 HTTP 请求；
-2. **Agent-E**：自动解析 `Dockerfile`/`docker-compose.yml`，动态构建镜像拉起沙箱，"正则启发式预检 + LLM 深度响应分析"双层判定，将漏洞标记为 `CONFIRMED`。
+1. **Agent-S**：内置 15 类漏洞专属 Payload 模板（SpEL、OGNL、Pickle、Jinja2 等），结合 LLM 对源码参数的推断，生成格式化 HTTP 请求；
+2. **Agent-E**：自动解析 `Dockerfile`/`docker-compose.yml`，动态构建镜像拉起沙箱（需目标仓库含 Docker 支持，否则自动降级为 `SKIPPED`）；采用 16 类、40+ 条正则规则预检 + LLM 深度响应分析双层判定，将漏洞标记为 `CONFIRMED`。
 
 ---
 
