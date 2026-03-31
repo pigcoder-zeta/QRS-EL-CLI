@@ -20,6 +20,7 @@ from __future__ import annotations
 import concurrent.futures
 import datetime
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,6 +153,10 @@ class Coordinator:
 
     支持单次扫描（run）和多漏洞并行扫描（run_parallel）。
     """
+
+    # CodeQL analyze 命令独占数据库 IMB 缓存，同一时刻只能有一个线程执行 analyze。
+    # 此类级锁确保并行扫描时 Phase 3 串行化，避免 OverlappingFileLockException。
+    _analyze_lock: threading.Lock = threading.Lock()
 
     def __init__(
         self,
@@ -409,11 +414,13 @@ class Coordinator:
         )
         logger.info("[Phase 3] 运行 CodeQL 扫描，输出: %s", sarif_path)
 
-        success = self.runner.analyze(
-            db_path=state.db_path,
-            query_path=state.query_path,
-            output_sarif=sarif_path,
-        )
+        # CodeQL IMB 缓存不支持并发访问，加锁确保同一时刻只有一个 analyze 运行
+        with Coordinator._analyze_lock:
+            success = self.runner.analyze(
+                db_path=state.db_path,
+                query_path=state.query_path,
+                output_sarif=sarif_path,
+            )
         if not success:
             # analyze 失败通常是因为目标项目不含该框架的依赖（如在非 Spring 项目上
             # 运行 Spring EL 查询）。这种情况视为"0 发现"而非整体失败，
@@ -441,7 +448,7 @@ class Coordinator:
             try:
                 from src.utils.vuln_catalog import find as _vuln_find
                 entry = _vuln_find(self.config.vuln_type)
-                cwe = entry.cwes[0] if entry and entry.cwes else ""
+                cwe = entry.cwe if entry and entry.cwe else ""
 
                 sarif_ctx = self._extract_sarif_context(
                     sarif_path=sarif_path,
