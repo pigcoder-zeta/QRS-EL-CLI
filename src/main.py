@@ -1,5 +1,5 @@
 """
-QRS-EL 系统 CLI 入口。
+QRSE-X 系统 CLI 入口。
 
 支持三种扫描模式：
   # 本地目录 · 单漏洞类型
@@ -73,7 +73,7 @@ def _list_templates() -> None:
     from src.utils.ql_template_library import _ALL_TEMPLATES
 
     table = Table(
-        title="[bold cyan]QRS-EL 内置 QL 规则模板[/bold cyan]",
+        title="[bold cyan]QRSE-X 内置 QL 规则模板[/bold cyan]",
         box=box.ROUNDED, show_header=True, header_style="bold magenta",
     )
     table.add_column("Key",         style="cyan",  no_wrap=True)
@@ -159,8 +159,8 @@ def _yaml_to_arg(
 
 
 def _run_check() -> None:
-    """检查运行 QRS-EL 所需的关键依赖是否就绪。"""
-    console.print(Panel("[bold cyan]QRS-EL 环境健康检查[/bold cyan]", expand=False))
+    """检查运行 QRSE-X 所需的关键依赖是否就绪。"""
+    console.print(Panel("[bold cyan]QRSE-X 环境健康检查[/bold cyan]", expand=False))
 
     checks: list[tuple[str, bool, str]] = []
 
@@ -299,7 +299,7 @@ def _show_memory(memory_dir: str = "data/rule_memory") -> None:
     mem = RuleMemory(memory_dir=memory_dir)
     console.print(
         Panel(
-            f"[bold cyan]QRS-EL 规则记忆库[/bold cyan]  "
+            f"[bold cyan]QRSE-X 规则记忆库[/bold cyan]  "
             f"[dim]共 {mem.count()} 条规则 | 向量后端: {mem.get_backend_name()}[/dim]",
             expand=False,
         )
@@ -458,7 +458,7 @@ def _import_memory(bundle_path: str, memory_dir: str = "data/rule_memory") -> No
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qrs-el",
-        description="QRS-EL：多 Agent 协同的 CodeQL 规则自动生成与表达式注入漏洞检测系统",
+        description="QRSE-X：多 Agent 协同的 CodeQL 规则自动生成与表达式注入漏洞检测系统",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
@@ -770,7 +770,7 @@ def _run_with_progress(
     from src.orchestrator.coordinator import Coordinator, PipelineState
 
     console.print(Panel(
-        f"[bold green]QRS-EL 启动[/bold green]\n"
+        f"[bold green]QRSE-X 启动[/bold green]\n"
         f"语言: [cyan]{base_config.language}[/cyan]  "
         f"漏洞类型数: [cyan]{len(vuln_types)}[/cyan]  "
         f"模式: [cyan]{'GitHub' if base_config.github_url else '本地'}[/cyan]",
@@ -944,7 +944,7 @@ def _print_rich_summary(states: "list[PipelineState]") -> None:
         + dyn_label +
         f"  失败: [red]{failed}[/red]"
     )
-    console.print(Panel(summary_text, title="[bold]QRS-EL 扫描完成[/bold]", expand=False))
+    console.print(Panel(summary_text, title="[bold]QRSE-X 扫描完成[/bold]", expand=False))
 
     for state in states:
         vuln_label = state.vuln_type or "未知"

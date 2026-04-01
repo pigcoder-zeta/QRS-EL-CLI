@@ -1,5 +1,5 @@
 """
-Coordinator：QRS-EL 系统的工作流调度中心（全功能版）。
+Coordinator：QRSE-X 系统的工作流调度中心（全功能版）。
 
 Pipeline 阶段：
   Phase 0: （GitHub 模式）克隆仓库 + 探测构建命令
@@ -149,7 +149,7 @@ class PipelineState:
 
 class Coordinator:
     """
-    QRS-EL 工作流协调器（全功能版）。
+    QRSE-X 工作流协调器（全功能版）。
 
     支持单次扫描（run）和多漏洞并行扫描（run_parallel）。
     """
@@ -454,6 +454,12 @@ class Coordinator:
                     sarif_path=sarif_path,
                     repo_root=state.source_dir or "",
                 )
+                # 构建来源标识：GitHub URL 优先，本地路径用 local:// 前缀
+                source_repo = (
+                    self.config.github_url
+                    if self.config.github_url
+                    else f"local://{state.source_dir or ''}"
+                )
                 self.rule_memory.save(
                     language=self.config.language,
                     vuln_type=self.config.vuln_type,
@@ -465,6 +471,10 @@ class Coordinator:
                     code_snippet=sarif_ctx["code_snippet"],
                     cwe=cwe,
                     detected_frameworks=list(state.detected_frameworks or []),
+                    # 来源验证字段
+                    source_repo=source_repo,
+                    source_commit=state.commit_hash or "",
+                    import_source="local_scan",
                 )
                 logger.info(
                     "[Phase 3.5] 规则已归档到 RAG 记忆库 | sink=%s | backend=%s",
@@ -598,7 +608,7 @@ class Coordinator:
         self.active_state = state  # 提前暴露，外部进度条可安全轮询
         mode = "GitHub 模式" if self.config.github_url else "本地模式"
         logger.info(
-            "=== QRS-EL Pipeline 启动 | %s | run_id=%s | 语言=%s | 漏洞=%s ===",
+            "=== QRSE-X Pipeline 启动 | %s | run_id=%s | 语言=%s | 漏洞=%s ===",
             mode, state.run_id, self.config.language, self.config.vuln_type,
         )
 
@@ -672,7 +682,7 @@ class Coordinator:
         state.completed_phases.append("create_database")   # 标记为已完成（由调用方提供）
 
         logger.info(
-            "=== QRS-EL Phase 2-5 启动 | 漏洞=%s | DB=%s ===",
+            "=== QRSE-X Phase 2-5 启动 | 漏洞=%s | DB=%s ===",
             self.config.vuln_type, db_path,
         )
 
@@ -721,7 +731,7 @@ class Coordinator:
             raise ValueError("vuln_types 列表不能为空。")
 
         logger.info(
-            "=== QRS-EL 并行扫描启动 | 语言=%s | 漏洞类型数=%d | 并发=%d ===",
+            "=== QRSE-X 并行扫描启动 | 语言=%s | 漏洞类型数=%d | 并发=%d ===",
             base_config.language, len(vuln_types), max_workers,
         )
 

@@ -692,6 +692,675 @@ select sink, "Command injection: user-controlled data from $@ flows into OS comm
 )
 
 # ---------------------------------------------------------------------------
+# JavaScript 模板集合
+# ---------------------------------------------------------------------------
+
+_JS_SQL_INJECTION = QLTemplate(
+    key="javascript/sql-injection",
+    language="javascript",
+    vuln_type="sql injection",
+    description="JavaScript SQL 注入（mysql/pg query 字符串拼接）",
+    code="""\
+/**
+ * @name SQL Injection (JavaScript)
+ * @description User-controlled data flows into a SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import javascript
+
+private class SqlQuerySink extends DataFlow::Node {
+  SqlQuerySink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "query" or
+        call.getCalleeName() = "execute" or
+        call.getCalleeName() = "raw"
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlQuerySink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_JS_COMMAND_INJECTION = QLTemplate(
+    key="javascript/command-injection",
+    language="javascript",
+    vuln_type="command injection",
+    description="JavaScript 命令注入（child_process exec/spawn）",
+    code="""\
+/**
+ * @name Command Injection (JavaScript)
+ * @description User-controlled data flows into child_process command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import javascript
+
+private class CmdExecSink extends DataFlow::Node {
+  CmdExecSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "exec" or
+        call.getCalleeName() = "execSync" or
+        call.getCalleeName() = "execFile" or
+        call.getCalleeName() = "execFileSync"
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CmdExecSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+_JS_PATH_TRAVERSAL = QLTemplate(
+    key="javascript/path-traversal",
+    language="javascript",
+    vuln_type="path traversal",
+    description="JavaScript 路径穿越（fs.readFile / fs.createReadStream）",
+    code="""\
+/**
+ * @name Path Traversal (JavaScript)
+ * @description User-controlled path flows into file system access without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import javascript
+
+private class FsReadSink extends DataFlow::Node {
+  FsReadSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "readFile" or
+        call.getCalleeName() = "readFileSync" or
+        call.getCalleeName() = "createReadStream" or
+        call.getCalleeName() = "writeFile" or
+        call.getCalleeName() = "writeFileSync"
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof FsReadSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+_JS_SSRF = QLTemplate(
+    key="javascript/ssrf",
+    language="javascript",
+    vuln_type="ssrf",
+    description="JavaScript SSRF（fetch / axios / http.request）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (JavaScript)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import javascript
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "fetch" or
+        call.getCalleeName() = "request"
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# Go 模板集合
+# ---------------------------------------------------------------------------
+
+_GO_SQL_INJECTION = QLTemplate(
+    key="go/sql-injection",
+    language="go",
+    vuln_type="sql injection",
+    description="Go SQL 注入（database/sql Query/Exec 字符串拼接）",
+    code="""\
+/**
+ * @name SQL Injection (Go)
+ * @description User-controlled data flows into SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id go/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import go
+
+private class SqlQuerySink extends DataFlow::Node {
+  SqlQuerySink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getTarget().(Method).hasQualifiedName("database/sql", "DB", "Query") or
+        call.getTarget().(Method).hasQualifiedName("database/sql", "DB", "QueryRow") or
+        call.getTarget().(Method).hasQualifiedName("database/sql", "DB", "Exec") or
+        call.getTarget().(Method).hasQualifiedName("database/sql", "Tx", "Query") or
+        call.getTarget().(Method).hasQualifiedName("database/sql", "Tx", "Exec")
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlQuerySink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_GO_COMMAND_INJECTION = QLTemplate(
+    key="go/command-injection",
+    language="go",
+    vuln_type="command injection",
+    description="Go 命令注入（os/exec Command）",
+    code="""\
+/**
+ * @name Command Injection (Go)
+ * @description User-controlled data flows into OS command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id go/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import go
+
+private class CmdSink extends DataFlow::Node {
+  CmdSink() {
+    exists(DataFlow::CallNode call |
+      call.getTarget().hasQualifiedName("os/exec", "Command") and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CmdSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+_GO_PATH_TRAVERSAL = QLTemplate(
+    key="go/path-traversal",
+    language="go",
+    vuln_type="path traversal",
+    description="Go 路径穿越（os.Open / os.ReadFile）",
+    code="""\
+/**
+ * @name Path Traversal (Go)
+ * @description User-controlled path flows into file access without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id go/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import go
+
+private class PathSink extends DataFlow::Node {
+  PathSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getTarget().hasQualifiedName("os", "Open") or
+        call.getTarget().hasQualifiedName("os", "OpenFile") or
+        call.getTarget().hasQualifiedName("os", "ReadFile") or
+        call.getTarget().hasQualifiedName("io/ioutil", "ReadFile")
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof PathSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+_GO_SSRF = QLTemplate(
+    key="go/ssrf",
+    language="go",
+    vuln_type="ssrf",
+    description="Go SSRF（net/http Get / http.NewRequest）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (Go)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id go/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import go
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getTarget().hasQualifiedName("net/http", "Get") or
+        call.getTarget().hasQualifiedName("net/http", "Post") or
+        call.getTarget().hasQualifiedName("net/http", "Head")
+      ) and
+      this = call.getArgument(0)
+    )
+    or
+    exists(DataFlow::CallNode call |
+      call.getTarget().hasQualifiedName("net/http", "NewRequest") and
+      this = call.getArgument(1)
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# C# 模板集合
+# ---------------------------------------------------------------------------
+
+_CSHARP_SQL_INJECTION = QLTemplate(
+    key="csharp/sql-injection",
+    language="csharp",
+    vuln_type="sql injection",
+    description="C# SQL 注入（SqlCommand / Entity Framework raw SQL）",
+    code="""\
+/**
+ * @name SQL Injection (C#)
+ * @description User-controlled data flows into SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class SqlSink extends DataFlow::Node {
+  SqlSink() {
+    exists(ObjectCreation oc |
+      oc.getObjectType().hasQualifiedName("System.Data.SqlClient", "SqlCommand") and
+      this.asExpr() = oc.getArgument(0)
+    )
+    or
+    exists(MethodCall mc |
+      (
+        mc.getTarget().getName() = "FromSqlRaw" or
+        mc.getTarget().getName() = "ExecuteSqlRaw"
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlSink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_CSHARP_COMMAND_INJECTION = QLTemplate(
+    key="csharp/command-injection",
+    language="csharp",
+    vuln_type="command injection",
+    description="C# 命令注入（Process.Start）",
+    code="""\
+/**
+ * @name Command Injection (C#)
+ * @description User-controlled data flows into OS command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class CmdSink extends DataFlow::Node {
+  CmdSink() {
+    exists(MethodCall mc |
+      mc.getTarget().hasQualifiedName("System.Diagnostics", "Process", "Start") and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CmdSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+_CSHARP_PATH_TRAVERSAL = QLTemplate(
+    key="csharp/path-traversal",
+    language="csharp",
+    vuln_type="path traversal",
+    description="C# 路径穿越（System.IO File / StreamReader）",
+    code="""\
+/**
+ * @name Path Traversal (C#)
+ * @description User-controlled path flows into file access without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class PathSink extends DataFlow::Node {
+  PathSink() {
+    exists(MethodCall mc |
+      (
+        mc.getTarget().hasQualifiedName("System.IO", "File", "ReadAllText") or
+        mc.getTarget().hasQualifiedName("System.IO", "File", "ReadAllBytes") or
+        mc.getTarget().hasQualifiedName("System.IO", "File", "OpenRead") or
+        mc.getTarget().hasQualifiedName("System.IO", "File", "Open")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+    or
+    exists(ObjectCreation oc |
+      (
+        oc.getObjectType().hasQualifiedName("System.IO", "StreamReader") or
+        oc.getObjectType().hasQualifiedName("System.IO", "FileStream")
+      ) and
+      this.asExpr() = oc.getArgument(0)
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof PathSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+_CSHARP_SSRF = QLTemplate(
+    key="csharp/ssrf",
+    language="csharp",
+    vuln_type="ssrf",
+    description="C# SSRF（HttpClient / WebClient）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (C#)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(MethodCall mc |
+      (
+        mc.getTarget().hasQualifiedName("System.Net.Http", "HttpClient", "GetAsync") or
+        mc.getTarget().hasQualifiedName("System.Net.Http", "HttpClient", "PostAsync") or
+        mc.getTarget().hasQualifiedName("System.Net.Http", "HttpClient", "SendAsync") or
+        mc.getTarget().hasQualifiedName("System.Net", "WebClient", "DownloadString")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# C++ 模板集合
+# ---------------------------------------------------------------------------
+
+_CPP_COMMAND_INJECTION = QLTemplate(
+    key="cpp/command-injection",
+    language="cpp",
+    vuln_type="command injection",
+    description="C/C++ 命令注入（system / popen / exec 系列）",
+    code="""\
+/**
+ * @name Command Injection (C/C++)
+ * @description User-controlled data flows into OS command execution.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/command-injection
+ * @tags security external/cwe/cwe-078
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class CmdSink extends DataFlow::Node {
+  CmdSink() {
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("system") or
+        fc.getTarget().hasName("popen") or
+        fc.getTarget().hasName("execl") or
+        fc.getTarget().hasName("execlp") or
+        fc.getTarget().hasName("execvp")
+      ) and
+      this.asExpr() = fc.getArgument(0)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      fc.getTarget().hasName("getenv") and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module CmdConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof CmdSink }
+}
+
+module CmdFlow = TaintTracking::Global<CmdConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where CmdFlow::flow(source, sink)
+select sink, "Command injection: user-controlled data from $@ flows into OS command.", source, "user input"
+""",
+)
+
+_CPP_PATH_TRAVERSAL = QLTemplate(
+    key="cpp/path-traversal",
+    language="cpp",
+    vuln_type="path traversal",
+    description="C/C++ 路径穿越（fopen / open / ifstream）",
+    code="""\
+/**
+ * @name Path Traversal (C/C++)
+ * @description User-controlled path flows into file access without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class PathSink extends DataFlow::Node {
+  PathSink() {
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("fopen") or
+        fc.getTarget().hasName("open") or
+        fc.getTarget().hasName("freopen") or
+        fc.getTarget().hasName("access")
+      ) and
+      this.asExpr() = fc.getArgument(0)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      fc.getTarget().hasName("getenv") and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof PathSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
 # 模板注册表
 # ---------------------------------------------------------------------------
 
@@ -713,10 +1382,30 @@ _ALL_TEMPLATES: list[QLTemplate] = [
     # Python - 通用
     _PYTHON_SQL_INJECTION,
     _PYTHON_COMMAND_INJECTION,
+    # JavaScript
+    _JS_SQL_INJECTION,
+    _JS_COMMAND_INJECTION,
+    _JS_PATH_TRAVERSAL,
+    _JS_SSRF,
+    # Go
+    _GO_SQL_INJECTION,
+    _GO_COMMAND_INJECTION,
+    _GO_PATH_TRAVERSAL,
+    _GO_SSRF,
+    # C#
+    _CSHARP_SQL_INJECTION,
+    _CSHARP_COMMAND_INJECTION,
+    _CSHARP_PATH_TRAVERSAL,
+    _CSHARP_SSRF,
+    # C++
+    _CPP_COMMAND_INJECTION,
+    _CPP_PATH_TRAVERSAL,
 ]
 
 # 关键词 → 模板映射（优先精确匹配）
-_KEYWORD_MAP: dict[str, QLTemplate] = {
+_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {}
+
+_KEYWORD_MAP_FLAT: dict[str, QLTemplate] = {
     # Java - EL
     "spel":                         _JAVA_SPEL,
     "spring el":                    _JAVA_SPEL,
@@ -728,19 +1417,6 @@ _KEYWORD_MAP: dict[str, QLTemplate] = {
     "mvel injection":               _JAVA_MVEL,
     "el injection":                 _JAVA_EL_COMBINED,
     "expression injection":         _JAVA_EL_COMBINED,
-    # Java - 通用
-    "sql injection":                _JAVA_SQL_INJECTION,
-    "sql":                          _JAVA_SQL_INJECTION,
-    "sqli":                         _JAVA_SQL_INJECTION,
-    "command injection":            _JAVA_COMMAND_INJECTION,
-    "os command":                   _JAVA_COMMAND_INJECTION,
-    "rce":                          _JAVA_COMMAND_INJECTION,
-    "path traversal":               _JAVA_PATH_TRAVERSAL,
-    "directory traversal":          _JAVA_PATH_TRAVERSAL,
-    "lfi":                          _JAVA_PATH_TRAVERSAL,
-    "ssrf":                         _JAVA_SSRF,
-    "server-side request forgery":  _JAVA_SSRF,
-    "server side request forgery":  _JAVA_SSRF,
     # Python
     "jinja2":                       _PYTHON_JINJA2,
     "jinja":                        _PYTHON_JINJA2,
@@ -748,6 +1424,81 @@ _KEYWORD_MAP: dict[str, QLTemplate] = {
     "ssti":                         _PYTHON_SSTI_COMBINED,
     "template injection":           _PYTHON_SSTI_COMBINED,
     "server-side template":         _PYTHON_SSTI_COMBINED,
+}
+
+_LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
+    "java": {
+        "sql injection":                _JAVA_SQL_INJECTION,
+        "sql":                          _JAVA_SQL_INJECTION,
+        "sqli":                         _JAVA_SQL_INJECTION,
+        "command injection":            _JAVA_COMMAND_INJECTION,
+        "os command":                   _JAVA_COMMAND_INJECTION,
+        "rce":                          _JAVA_COMMAND_INJECTION,
+        "path traversal":              _JAVA_PATH_TRAVERSAL,
+        "directory traversal":         _JAVA_PATH_TRAVERSAL,
+        "lfi":                          _JAVA_PATH_TRAVERSAL,
+        "ssrf":                         _JAVA_SSRF,
+        "server-side request forgery":  _JAVA_SSRF,
+        "server side request forgery":  _JAVA_SSRF,
+    },
+    "python": {
+        "sql injection":                _PYTHON_SQL_INJECTION,
+        "sql":                          _PYTHON_SQL_INJECTION,
+        "sqli":                         _PYTHON_SQL_INJECTION,
+        "command injection":            _PYTHON_COMMAND_INJECTION,
+        "os command":                   _PYTHON_COMMAND_INJECTION,
+        "rce":                          _PYTHON_COMMAND_INJECTION,
+    },
+    "javascript": {
+        "sql injection":                _JS_SQL_INJECTION,
+        "sql":                          _JS_SQL_INJECTION,
+        "sqli":                         _JS_SQL_INJECTION,
+        "command injection":            _JS_COMMAND_INJECTION,
+        "os command":                   _JS_COMMAND_INJECTION,
+        "rce":                          _JS_COMMAND_INJECTION,
+        "path traversal":              _JS_PATH_TRAVERSAL,
+        "directory traversal":         _JS_PATH_TRAVERSAL,
+        "lfi":                          _JS_PATH_TRAVERSAL,
+        "ssrf":                         _JS_SSRF,
+        "server-side request forgery":  _JS_SSRF,
+        "server side request forgery":  _JS_SSRF,
+    },
+    "go": {
+        "sql injection":                _GO_SQL_INJECTION,
+        "sql":                          _GO_SQL_INJECTION,
+        "sqli":                         _GO_SQL_INJECTION,
+        "command injection":            _GO_COMMAND_INJECTION,
+        "os command":                   _GO_COMMAND_INJECTION,
+        "rce":                          _GO_COMMAND_INJECTION,
+        "path traversal":              _GO_PATH_TRAVERSAL,
+        "directory traversal":         _GO_PATH_TRAVERSAL,
+        "lfi":                          _GO_PATH_TRAVERSAL,
+        "ssrf":                         _GO_SSRF,
+        "server-side request forgery":  _GO_SSRF,
+        "server side request forgery":  _GO_SSRF,
+    },
+    "csharp": {
+        "sql injection":                _CSHARP_SQL_INJECTION,
+        "sql":                          _CSHARP_SQL_INJECTION,
+        "sqli":                         _CSHARP_SQL_INJECTION,
+        "command injection":            _CSHARP_COMMAND_INJECTION,
+        "os command":                   _CSHARP_COMMAND_INJECTION,
+        "rce":                          _CSHARP_COMMAND_INJECTION,
+        "path traversal":              _CSHARP_PATH_TRAVERSAL,
+        "directory traversal":         _CSHARP_PATH_TRAVERSAL,
+        "lfi":                          _CSHARP_PATH_TRAVERSAL,
+        "ssrf":                         _CSHARP_SSRF,
+        "server-side request forgery":  _CSHARP_SSRF,
+        "server side request forgery":  _CSHARP_SSRF,
+    },
+    "cpp": {
+        "command injection":            _CPP_COMMAND_INJECTION,
+        "os command":                   _CPP_COMMAND_INJECTION,
+        "rce":                          _CPP_COMMAND_INJECTION,
+        "path traversal":              _CPP_PATH_TRAVERSAL,
+        "directory traversal":         _CPP_PATH_TRAVERSAL,
+        "lfi":                          _CPP_PATH_TRAVERSAL,
+    },
 }
 
 
@@ -779,11 +1530,20 @@ class QLTemplateLibrary:
         lang = language.lower()
         query = vuln_type.lower()
 
-        # 精确关键词匹配
-        for kw, tmpl in _KEYWORD_MAP.items():
+        # 1. 语言无关的特殊关键词（如 spel / ognl / jinja2）
+        for kw, tmpl in _KEYWORD_MAP_FLAT.items():
             if kw in query and tmpl.language == lang:
                 logger.info(
-                    "模板知识库命中 [关键词='%s']: %s", kw, tmpl.key
+                    "模板知识库命中 [特殊关键词='%s']: %s", kw, tmpl.key
+                )
+                return tmpl
+
+        # 2. 按语言查找通用漏洞模板
+        lang_map = _LANG_KEYWORD_MAP.get(lang, {})
+        for kw, tmpl in lang_map.items():
+            if kw in query:
+                logger.info(
+                    "模板知识库命中 [语言=%s, 关键词='%s']: %s", lang, kw, tmpl.key
                 )
                 return tmpl
 

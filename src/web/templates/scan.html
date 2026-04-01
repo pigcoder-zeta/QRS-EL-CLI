@@ -1,0 +1,525 @@
+{% extends "layout.html" %}
+{% block title %}QRSE-X - 扫描{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h2 class="text-2xl font-bold">扫描配置</h2>
+    <p class="text-gray-500 text-sm mt-1">配置扫描参数并实时查看检测进度</p>
+  </div>
+  <div class="flex gap-2 print:hidden">
+    <span class="mode-chip mode-a">A 静态</span>
+    <span class="mode-chip mode-b">B 实时</span>
+    <span class="mode-chip mode-c">C 交互</span>
+  </div>
+</div>
+
+<!-- Mode C: Quick presets -->
+<div class="mb-4">
+  <div class="text-xs text-gray-500 mb-2 font-semibold">快速预设 <span class="mode-chip mode-c ml-1">交互</span></div>
+  <div class="flex gap-2 flex-wrap">
+    <button class="preset-card" onclick="applyPreset('java-all')"><span class="text-sm text-brand-500">Java 全量扫描</span><br/><span class="text-xs text-gray-600">14 种漏洞 × 并行</span></button>
+    <button class="preset-card" onclick="applyPreset('java-injection')"><span class="text-sm text-yellow-400">Java 注入类</span><br/><span class="text-xs text-gray-600">SQL + CMD + EL + OGNL</span></button>
+    <button class="preset-card" onclick="applyPreset('python-ssti')"><span class="text-sm text-green-400">Python SSTI</span><br/><span class="text-xs text-gray-600">Jinja2 + Mako</span></button>
+    <button class="preset-card" onclick="applyPreset('quick')"><span class="text-sm text-gray-300">极速模式</span><br/><span class="text-xs text-gray-600">禁用 Agent-S/E</span></button>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+  <!-- Config form (left 2 cols) -->
+  <div class="lg:col-span-2 space-y-4" id="config-panel">
+    <div class="card">
+      <div class="card-header"><span class="font-semibold text-sm">基础配置</span></div>
+      <div class="card-body space-y-4">
+        <!-- Source type toggle -->
+        <div>
+          <label class="form-label">输入源</label>
+          <div class="flex gap-2 mb-2">
+            <button type="button" class="btn btn-sm source-toggle active" data-src="github" onclick="toggleSource('github')">GitHub URL</button>
+            <button type="button" class="btn btn-sm source-toggle" data-src="local" onclick="toggleSource('local')">本地路径</button>
+          </div>
+          <input id="input-github-url" class="form-input" placeholder="https://github.com/user/repo" />
+          <input id="input-source-dir" class="form-input hidden" placeholder="C:\path\to\source" />
+        </div>
+        <!-- Language -->
+        <div>
+          <label class="form-label">目标语言</label>
+          <select id="input-language" class="form-select">
+            <option value="java">Java</option>
+            <option value="python">Python</option>
+            <option value="javascript">JavaScript</option>
+            <option value="go">Go</option>
+            <option value="csharp">C#</option>
+            <option value="cpp">C++</option>
+          </select>
+        </div>
+        <!-- Vuln types -->
+        <div>
+          <label class="form-label">漏洞类型 <span class="text-gray-600">(可多选)</span></label>
+          <div id="vuln-type-list" class="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Advanced options -->
+    <div class="card">
+      <div class="card-header cursor-pointer" onclick="document.getElementById('adv-body').classList.toggle('hidden')">
+        <span class="font-semibold text-sm">高级选项</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      </div>
+      <div id="adv-body" class="card-body space-y-3 hidden">
+        <div>
+          <label class="form-label">Sink 提示</label>
+          <input id="input-sink-hints" class="form-input" placeholder="如 Ognl.getValue, Runtime.exec" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="form-label">最大重试</label>
+            <input id="input-retries" class="form-input" type="number" value="3" min="1" max="10" />
+          </div>
+          <div>
+            <label class="form-label">并行线程</label>
+            <input id="input-workers" class="form-input" type="number" value="3" min="1" max="8" />
+          </div>
+        </div>
+        <div>
+          <label class="form-label">最低置信度</label>
+          <input id="input-confidence" class="form-input" type="number" value="0.5" min="0" max="1" step="0.1" />
+        </div>
+        <div>
+          <label class="form-label">Agent-E 远程地址 <span class="text-gray-600">(留空用 Docker)</span></label>
+          <input id="input-agent-e-host" class="form-input" placeholder="http://localhost:8080" />
+        </div>
+        <!-- Toggles -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">Agent-R 语义审查</span>
+            <div class="toggle-switch active" id="toggle-agent-r" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">Agent-S PoC 生成</span>
+            <div class="toggle-switch active" id="toggle-agent-s" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">Agent-E 动态验证</span>
+            <div class="toggle-switch active" id="toggle-agent-e" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">规则记忆库</span>
+            <div class="toggle-switch active" id="toggle-memory" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">跳过编译 (--no-build)</span>
+            <div class="toggle-switch" id="toggle-no-build" onclick="this.classList.toggle('active')"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button id="btn-start" class="btn btn-primary w-full justify-center text-base py-3" onclick="startScan()">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      启动扫描
+    </button>
+
+    <!-- Mode A: YAML config preview/export -->
+    <div class="card mt-4">
+      <div class="card-header cursor-pointer" onclick="toggleYamlPreview()">
+        <span class="font-semibold text-sm">YAML 配置预览 <span class="mode-chip mode-a ml-1">静态</span></span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      </div>
+      <div id="yaml-body" class="card-body hidden">
+        <pre id="yaml-preview" class="text-xs bg-black rounded p-3 overflow-x-auto text-green-400 font-mono leading-relaxed"></pre>
+        <div class="flex gap-2 mt-2">
+          <button class="btn btn-sm btn-secondary" onclick="copyYaml()">复制 YAML</button>
+          <button class="btn btn-sm btn-secondary" onclick="downloadYaml()">下载 .yml</button>
+          <label class="btn btn-sm btn-secondary cursor-pointer">
+            导入 .yml
+            <input type="file" class="hidden" accept=".yml,.yaml" onchange="importYaml(this)" />
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progress panel (right 3 cols) -->
+  <div class="lg:col-span-3 space-y-4">
+    <!-- Phase progress -->
+    <div class="card" id="progress-card">
+      <div class="card-header">
+        <span class="font-semibold text-sm">Pipeline 进度</span>
+        <span class="badge badge-gray" id="progress-status">等待启动</span>
+      </div>
+      <div class="card-body">
+        <div id="phase-list">
+          <div class="phase-step" data-phase="clone"><div class="dot"></div><span>Phase 0 — 克隆仓库 / 框架检测</span></div>
+          <div class="phase-step" data-phase="create_database"><div class="dot"></div><span>Phase 1 — 创建 CodeQL 数据库</span></div>
+          <div class="phase-step" data-phase="generate_query"><div class="dot"></div><span>Phase 2 — Agent-Q 规则合成</span></div>
+          <div class="phase-step" data-phase="analyze"><div class="dot"></div><span>Phase 3 — CodeQL 扫描</span></div>
+          <div class="phase-step" data-phase="review"><div class="dot"></div><span>Phase 4 — Agent-R 语义审查</span></div>
+          <div class="phase-step" data-phase="generate_poc"><div class="dot"></div><span>Phase 5 — Agent-S PoC 构造</span></div>
+          <div class="phase-step" data-phase="verify"><div class="dot"></div><span>Phase 6 — Agent-E 动态验证</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Intermediate results -->
+    <div class="card hidden" id="intermediate-card">
+      <div class="card-header"><span class="font-semibold text-sm">中间结果</span></div>
+      <div class="card-body space-y-2" id="intermediate-body"></div>
+    </div>
+
+    <!-- Log console -->
+    <div class="card">
+      <div class="card-header">
+        <span class="font-semibold text-sm">实时日志</span>
+        <div class="flex gap-2">
+          <button class="btn btn-sm btn-secondary" onclick="toggleAutoScroll()">
+            <span id="scroll-label">自动滚动: 开</span>
+          </button>
+          <button class="btn btn-sm btn-secondary" onclick="clearLogs()">清空</button>
+        </div>
+      </div>
+      <div class="log-console" id="log-console"></div>
+    </div>
+
+    <!-- Final result link -->
+    <div class="hidden" id="result-link-card">
+      <a id="result-link" href="#" class="btn btn-primary w-full justify-center py-3">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+        查看扫描结果
+      </a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let autoScroll = true;
+let eventSource = null;
+
+function toggleSource(type) {
+  document.querySelectorAll('.source-toggle').forEach(b => {
+    b.classList.toggle('active', b.dataset.src === type);
+    b.classList.toggle('btn-primary', b.dataset.src === type);
+    b.classList.toggle('btn-secondary', b.dataset.src !== type);
+  });
+  document.getElementById('input-github-url').classList.toggle('hidden', type !== 'github');
+  document.getElementById('input-source-dir').classList.toggle('hidden', type !== 'local');
+}
+toggleSource('github');
+
+// Load vuln catalog
+fetch('/api/vuln-catalog').then(r => r.json()).then(catalog => {
+  const container = document.getElementById('vuln-type-list');
+  container.innerHTML = catalog.map(e =>
+    `<label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer hover:text-gray-200 py-0.5">
+      <input type="checkbox" value="${e.name}" class="vuln-cb rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-0" />
+      <span>${e.name}</span>
+    </label>`
+  ).join('');
+});
+
+function getConfig() {
+  const isGithub = !document.getElementById('input-github-url').classList.contains('hidden');
+  const vulnCbs = document.querySelectorAll('.vuln-cb:checked');
+  const vulnTypes = Array.from(vulnCbs).map(cb => cb.value);
+
+  return {
+    github_url: isGithub ? document.getElementById('input-github-url').value : undefined,
+    source_dir: !isGithub ? document.getElementById('input-source-dir').value : undefined,
+    language: document.getElementById('input-language').value,
+    vuln_types: vulnTypes.length > 0 ? vulnTypes : undefined,
+    vuln_type: vulnTypes.length === 0 ? 'sql injection' : undefined,
+    sink_hints: document.getElementById('input-sink-hints').value || undefined,
+    max_retries: parseInt(document.getElementById('input-retries').value),
+    parallel_workers: parseInt(document.getElementById('input-workers').value),
+    min_confidence: parseFloat(document.getElementById('input-confidence').value),
+    agent_e_host: document.getElementById('input-agent-e-host').value || undefined,
+    enable_agent_r: document.getElementById('toggle-agent-r').classList.contains('active'),
+    enable_agent_s: document.getElementById('toggle-agent-s').classList.contains('active'),
+    enable_agent_e: document.getElementById('toggle-agent-e').classList.contains('active'),
+    enable_rule_memory: document.getElementById('toggle-memory').classList.contains('active'),
+    no_build: document.getElementById('toggle-no-build').classList.contains('active'),
+  };
+}
+
+async function startScan() {
+  const config = getConfig();
+  if (!config.github_url && !config.source_dir) {
+    alert('请输入 GitHub URL 或本地源码路径');
+    return;
+  }
+
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-start').textContent = '扫描中...';
+  document.getElementById('progress-status').textContent = '运行中';
+  document.getElementById('progress-status').className = 'badge badge-blue';
+  document.getElementById('result-link-card').classList.add('hidden');
+
+  // Reset phases
+  document.querySelectorAll('.phase-step').forEach(el => {
+    el.classList.remove('completed', 'running');
+  });
+
+  const res = await fetch('/api/scan/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config),
+  });
+  const {task_id} = await res.json();
+  connectSSE(task_id);
+}
+
+function connectSSE(taskId) {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource(`/api/scan/stream/${taskId}`);
+
+  eventSource.addEventListener('log', e => {
+    const data = JSON.parse(e.data);
+    appendLog(data.level, data.message);
+    guessPhase(data.message);
+  });
+
+  eventSource.addEventListener('phase_start', e => {
+    const data = JSON.parse(e.data);
+    setPhaseRunning(data.phase);
+  });
+
+  eventSource.addEventListener('phase_complete', e => {
+    const data = JSON.parse(e.data);
+    setPhaseCompleted(data.phase);
+  });
+
+  eventSource.addEventListener('intermediate', e => {
+    const data = JSON.parse(e.data);
+    showIntermediate(data);
+  });
+
+  eventSource.addEventListener('complete', e => {
+    const data = JSON.parse(e.data);
+    document.getElementById('progress-status').textContent = '完成';
+    document.getElementById('progress-status').className = 'badge badge-green';
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-start').textContent = '启动扫描';
+    if (data.result_file) {
+      document.getElementById('result-link').href = `/results/${data.result_file}`;
+      document.getElementById('result-link-card').classList.remove('hidden');
+    }
+    appendLog('info', '=== 扫描完成 ===');
+    eventSource.close();
+  });
+
+  eventSource.addEventListener('error', e => {
+    try {
+      const data = JSON.parse(e.data);
+      appendLog('error', data.message);
+    } catch (_) {}
+    document.getElementById('progress-status').textContent = '失败';
+    document.getElementById('progress-status').className = 'badge badge-red';
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-start').textContent = '启动扫描';
+    eventSource.close();
+  });
+}
+
+const PHASE_KEYWORDS = {
+  'Phase 0': 'clone', '克隆': 'clone', '框架检测': 'clone',
+  'Phase 1': 'create_database', '创建数据库': 'create_database', '建库': 'create_database',
+  'Phase 2': 'generate_query', 'Agent-Q': 'generate_query',
+  'Phase 3': 'analyze', 'CodeQL 扫描': 'analyze',
+  'Phase 4': 'review', 'Agent-R': 'review',
+  'Phase 5': 'generate_poc', 'Agent-S': 'generate_poc',
+  'Phase 6': 'verify', 'Agent-E': 'verify',
+};
+
+function guessPhase(msg) {
+  for (const [kw, phase] of Object.entries(PHASE_KEYWORDS)) {
+    if (msg.includes(kw)) {
+      setPhaseRunning(phase);
+      break;
+    }
+  }
+  // Detect completion keywords
+  if (msg.includes('规则就绪')) setPhaseCompleted('generate_query');
+  if (msg.includes('扫描完成') && msg.includes('Phase 3')) setPhaseCompleted('analyze');
+  if (msg.includes('审查完成')) setPhaseCompleted('review');
+  if (msg.includes('PoC 生成完成')) setPhaseCompleted('generate_poc');
+  if (msg.includes('动态验证完成') || msg.includes('Agent-E 已禁用')) setPhaseCompleted('verify');
+}
+
+function setPhaseRunning(phase) {
+  const el = document.querySelector(`.phase-step[data-phase="${phase}"]`);
+  if (el && !el.classList.contains('completed')) {
+    el.classList.add('running');
+  }
+}
+
+function setPhaseCompleted(phase) {
+  const el = document.querySelector(`.phase-step[data-phase="${phase}"]`);
+  if (el) {
+    el.classList.remove('running');
+    el.classList.add('completed');
+  }
+}
+
+function appendLog(level, message) {
+  const console_ = document.getElementById('log-console');
+  const ts = new Date().toLocaleTimeString('zh-CN');
+  const div = document.createElement('div');
+  div.className = `log-line ${level}`;
+  div.innerHTML = `<span class="ts">[${ts}]</span> ${escapeHtml(message)}`;
+  console_.appendChild(div);
+  if (autoScroll) console_.scrollTop = console_.scrollHeight;
+}
+
+function showIntermediate(data) {
+  const card = document.getElementById('intermediate-card');
+  const body = document.getElementById('intermediate-body');
+  card.classList.remove('hidden');
+  if (data.type === 'review_summary') {
+    body.innerHTML += `<div class="flex gap-3 text-sm">
+      <span class="text-red-400">漏洞: ${data.vulnerable || 0}</span>
+      <span class="text-gray-400">总发现: ${data.total_findings || 0}</span>
+    </div>`;
+  } else if (data.type === 'ql_code') {
+    body.innerHTML += `<details class="text-sm"><summary class="cursor-pointer text-brand-500">查看生成的 QL 代码</summary>
+      <pre class="mt-2 text-xs bg-black rounded p-2 overflow-x-auto"><code>${escapeHtml(data.content)}</code></pre></details>`;
+  }
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  document.getElementById('scroll-label').textContent = `自动滚动: ${autoScroll ? '开' : '关'}`;
+}
+
+function clearLogs() {
+  document.getElementById('log-console').innerHTML = '';
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// --- Mode C: Presets ---
+function applyPreset(name) {
+  document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+  const vulnCbs = document.querySelectorAll('.vuln-cb');
+  vulnCbs.forEach(cb => cb.checked = false);
+
+  if (name === 'java-all') {
+    document.getElementById('input-language').value = 'java';
+    vulnCbs.forEach(cb => cb.checked = true);
+    document.getElementById('input-workers').value = '5';
+  } else if (name === 'java-injection') {
+    document.getElementById('input-language').value = 'java';
+    const targets = ['sql injection','command injection','el injection','ognl injection'];
+    vulnCbs.forEach(cb => { if (targets.some(t => cb.value.toLowerCase().includes(t.split(' ')[0]))) cb.checked = true; });
+  } else if (name === 'python-ssti') {
+    document.getElementById('input-language').value = 'python';
+    vulnCbs.forEach(cb => { if (cb.value.toLowerCase().includes('ssti') || cb.value.toLowerCase().includes('template')) cb.checked = true; });
+  } else if (name === 'quick') {
+    document.getElementById('toggle-agent-s').classList.remove('active');
+    document.getElementById('toggle-agent-e').classList.remove('active');
+    document.getElementById('toggle-no-build').classList.add('active');
+  }
+  updateYamlPreview();
+}
+
+// --- Mode A: YAML Preview/Export ---
+function toggleYamlPreview() {
+  const body = document.getElementById('yaml-body');
+  body.classList.toggle('hidden');
+  if (!body.classList.contains('hidden')) updateYamlPreview();
+}
+
+function updateYamlPreview() {
+  const c = getConfig();
+  let yaml = '# QRSE-X 扫描配置\n';
+  if (c.github_url) yaml += `github_url: "${c.github_url}"\n`;
+  if (c.source_dir) yaml += `source_dir: "${c.source_dir}"\n`;
+  yaml += `language: ${c.language}\n`;
+  if (c.vuln_types && c.vuln_types.length > 0) {
+    yaml += 'vuln_types:\n';
+    c.vuln_types.forEach(v => yaml += `  - "${v}"\n`);
+  } else {
+    yaml += `vuln_type: "${c.vuln_type || 'sql injection'}"\n`;
+  }
+  if (c.sink_hints) yaml += `sink_hints: "${c.sink_hints}"\n`;
+  yaml += `max_retries: ${c.max_retries}\n`;
+  yaml += `parallel_workers: ${c.parallel_workers}\n`;
+  yaml += `min_confidence: ${c.min_confidence}\n`;
+  if (c.agent_e_host) yaml += `agent_e_host: "${c.agent_e_host}"\n`;
+  yaml += `no_agent_r: ${!c.enable_agent_r}\n`;
+  yaml += `no_agent_s: ${!c.enable_agent_s}\n`;
+  yaml += `no_agent_e: ${!c.enable_agent_e}\n`;
+  yaml += `enable_rule_memory: ${c.enable_rule_memory}\n`;
+  yaml += `no_build: ${c.no_build}\n`;
+  document.getElementById('yaml-preview').textContent = yaml;
+}
+
+function copyYaml() {
+  updateYamlPreview();
+  navigator.clipboard.writeText(document.getElementById('yaml-preview').textContent);
+  showToast('YAML 已复制到剪贴板');
+}
+
+function downloadYaml() {
+  updateYamlPreview();
+  const blob = new Blob([document.getElementById('yaml-preview').textContent], {type:'text/yaml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `qrse-scan-${Date.now()}.yml`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importYaml(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const text = e.target.result;
+    const lines = text.split('\n');
+    lines.forEach(line => {
+      const m = line.match(/^(\w+):\s*"?(.+?)"?\s*$/);
+      if (!m) return;
+      const [, key, val] = m;
+      if (key === 'github_url') { toggleSource('github'); document.getElementById('input-github-url').value = val; }
+      if (key === 'source_dir') { toggleSource('local'); document.getElementById('input-source-dir').value = val; }
+      if (key === 'language') document.getElementById('input-language').value = val;
+      if (key === 'max_retries') document.getElementById('input-retries').value = val;
+      if (key === 'parallel_workers') document.getElementById('input-workers').value = val;
+      if (key === 'min_confidence') document.getElementById('input-confidence').value = val;
+      if (key === 'sink_hints') document.getElementById('input-sink-hints').value = val;
+      if (key === 'no_agent_r' && val === 'true') document.getElementById('toggle-agent-r').classList.remove('active');
+      if (key === 'no_agent_s' && val === 'true') document.getElementById('toggle-agent-s').classList.remove('active');
+      if (key === 'no_agent_e' && val === 'true') document.getElementById('toggle-agent-e').classList.remove('active');
+      if (key === 'no_build' && val === 'true') document.getElementById('toggle-no-build').classList.add('active');
+    });
+    showToast('YAML 配置已导入');
+    updateYamlPreview();
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function showToast(msg) {
+  let container = document.querySelector('.toast-container');
+  if (!container) { container = document.createElement('div'); container.className = 'toast-container'; document.body.appendChild(container); }
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+// Keep YAML preview in sync
+document.querySelectorAll('input, select').forEach(el => el.addEventListener('change', () => {
+  if (!document.getElementById('yaml-body').classList.contains('hidden')) updateYamlPreview();
+}));
+</script>
+{% endblock %}

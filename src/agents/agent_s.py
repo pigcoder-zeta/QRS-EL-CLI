@@ -21,8 +21,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
-from __future__ import annotations as _annotations  # noqa: F401 – 允许前向引用
-
 from src.agents.agent_r import ReviewResult
 
 logger = logging.getLogger(__name__)

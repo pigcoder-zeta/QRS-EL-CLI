@@ -125,6 +125,114 @@ _SYSTEM_PROMPT_R_PYTHON = """\
 }
 """
 
+_SYSTEM_PROMPT_R_JAVASCRIPT = """\
+你是一位资深 JavaScript/TypeScript 安全研究员，擅长审查各类漏洞（SQL注入、命令注入、XSS、路径穿越、SSRF、原型链污染、不安全反序列化等）。
+你将收到一段 CodeQL 静态扫描发现，以及对应的 JavaScript/TypeScript 源码上下文。
+请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+
+通用审查维度：
+1. **数据来源**：用户输入是否真正可控（Express req.query/body/params、Koa ctx.request 等）？
+2. **净化器**：是否经过了参数化查询、validator/sanitize-html 库、path.resolve() + 前缀校验？
+3. **漏洞类型专属**：
+   - SQL注入：是否使用了参数化（mysql2 ? 占位符、knex 绑定、Sequelize ORM）？
+   - 命令注入：是否使用了 execFile（数组参数）而非 exec（字符串拼接）？
+   - XSS：输出是否经过 DOMPurify / escape-html / 模板引擎自动转义？
+   - 路径穿越：是否调用了 path.resolve() + startsWith() 前缀校验？
+   - SSRF：URL 是否经过白名单过滤？
+   - 原型链污染：merge/extend 是否对 __proto__ / constructor 做了过滤？
+4. **可达性**：代码路径是否可触达（非测试代码/中间件是否拦截）？
+5. **框架特性**：Express / Koa / NestJS 中间件链是否引入了安全防护？
+
+你的回复必须是合法的 JSON，格式如下：
+{
+  "status": "vulnerable" | "safe" | "uncertain",
+  "confidence": 0.0 ~ 1.0,
+  "engine_detected": "漏洞类型或框架名（如 child_process / mysql / express / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
+  "sink_method": "被调用的危险方法全名"
+}
+"""
+
+_SYSTEM_PROMPT_R_GO = """\
+你是一位资深 Go 安全研究员，擅长审查各类漏洞（SQL注入、命令注入、路径穿越、SSRF、不安全反序列化等）。
+你将收到一段 CodeQL 静态扫描发现，以及对应的 Go 源码上下文。
+请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+
+通用审查维度：
+1. **数据来源**：用户输入是否真正可控（http.Request FormValue/URL.Query/Body、gin c.Query 等）？
+2. **净化器**：是否经过了参数化查询、filepath.Clean() + 前缀校验、html.EscapeString()？
+3. **漏洞类型专属**：
+   - SQL注入：是否使用了 database/sql 的 ? 占位符参数绑定？
+   - 命令注入：是否使用了 exec.Command 的参数数组形式（非 bash -c 字符串）？
+   - 路径穿越：是否调用了 filepath.Clean() + strings.HasPrefix() 校验？
+   - SSRF：URL 是否经过白名单或 IP 过滤？
+4. **可达性**：Handler 是否注册在路由中？中间件是否有鉴权拦截？
+5. **Go 特性**：强类型转换是否天然阻止了注入（如 strconv.Atoi）？
+
+你的回复必须是合法的 JSON，格式如下：
+{
+  "status": "vulnerable" | "safe" | "uncertain",
+  "confidence": 0.0 ~ 1.0,
+  "engine_detected": "漏洞类型或包名（如 database/sql / os/exec / net/http / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
+  "sink_method": "被调用的危险方法全名"
+}
+"""
+
+_SYSTEM_PROMPT_R_CSHARP = """\
+你是一位资深 C# 安全研究员，擅长审查各类漏洞（SQL注入、命令注入、路径穿越、SSRF、XSS、不安全反序列化等）。
+你将收到一段 CodeQL 静态扫描发现，以及对应的 C# 源码上下文。
+请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+
+通用审查维度：
+1. **数据来源**：用户输入是否真正可控（ASP.NET Request.Query/Form/Body、[FromQuery]/[FromBody] 参数）？
+2. **净化器**：是否经过了参数化查询、Path.GetFullPath() + 前缀校验、HtmlEncoder.Encode()？
+3. **漏洞类型专属**：
+   - SQL注入：是否使用了 SqlParameter 参数化 / Entity Framework LINQ 查询？
+   - 命令注入：ProcessStartInfo.Arguments 是否拼接了用户输入？
+   - 路径穿越：是否调用了 Path.GetFullPath() + StartsWith() 校验？
+   - SSRF：HttpClient URL 是否经过白名单过滤？
+   - 反序列化：BinaryFormatter / JavaScriptSerializer 是否接受了不可信输入？
+4. **可达性**：Controller Action 是否可从外部触达？[Authorize] 属性影响？
+5. **框架特性**：ASP.NET Core 模型绑定 / Anti-Forgery Token / CORS 策略是否减轻风险？
+
+你的回复必须是合法的 JSON，格式如下：
+{
+  "status": "vulnerable" | "safe" | "uncertain",
+  "confidence": 0.0 ~ 1.0,
+  "engine_detected": "漏洞类型或框架名（如 SqlCommand / Process / HttpClient / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
+  "sink_method": "被调用的危险方法全名"
+}
+"""
+
+_SYSTEM_PROMPT_R_CPP = """\
+你是一位资深 C/C++ 安全研究员，擅长审查各类漏洞（命令注入、缓冲区溢出、格式化字符串、路径穿越、整数溢出、Use-After-Free 等）。
+你将收到一段 CodeQL 静态扫描发现，以及对应的 C/C++ 源码上下文。
+请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+
+通用审查维度：
+1. **数据来源**：用户输入是否真正可控（argv、getenv、fgets/scanf/read、网络 recv 等）？
+2. **净化器**：是否经过了输入长度校验、白名单过滤、整数范围检查、路径规范化？
+3. **漏洞类型专属**：
+   - 命令注入：是否使用了 system()/popen() 拼接字符串？可否用 execvp 数组参数替代？
+   - 缓冲区溢出：目标缓冲区大小是否足够？是否使用了 strncpy/snprintf 等安全版本？
+   - 格式化字符串：printf 系列是否直接使用了用户输入作为格式串？
+   - 路径穿越：fopen/open 的路径是否经过 realpath() + 前缀校验？
+   - 整数溢出：算术运算结果是否用于内存分配或数组索引？
+4. **可达性**：该代码路径是否在实际运行中可触达？
+5. **编译器防护**：是否开启了 ASLR/Stack Canary/FORTIFY_SOURCE 等缓解措施？
+
+你的回复必须是合法的 JSON，格式如下：
+{
+  "status": "vulnerable" | "safe" | "uncertain",
+  "confidence": 0.0 ~ 1.0,
+  "engine_detected": "漏洞类型（如 system() / fopen / printf / memcpy / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
+  "sink_method": "被调用的危险函数全名"
+}
+"""
+
 _SYSTEM_PROMPT_R_GENERIC = """\
 你是一位资深安全研究员，擅长审查各类 Web 应用安全漏洞。
 你将收到一段 CodeQL 静态扫描发现，以及对应的源码上下文。
@@ -148,8 +256,12 @@ _SYSTEM_PROMPT_R_GENERIC = """\
 """
 
 _SYSTEM_PROMPTS_R: dict[str, str] = {
-    "java":   _SYSTEM_PROMPT_R_JAVA,
-    "python": _SYSTEM_PROMPT_R_PYTHON,
+    "java":       _SYSTEM_PROMPT_R_JAVA,
+    "python":     _SYSTEM_PROMPT_R_PYTHON,
+    "javascript": _SYSTEM_PROMPT_R_JAVASCRIPT,
+    "go":         _SYSTEM_PROMPT_R_GO,
+    "csharp":     _SYSTEM_PROMPT_R_CSHARP,
+    "cpp":        _SYSTEM_PROMPT_R_CPP,
 }
 
 # 兼容旧引用
@@ -163,9 +275,10 @@ def _get_review_system_prompt(language: str) -> str:
 
 def _get_code_block_lang(language: str) -> str:
     """返回 markdown 代码块对应的语言标签。"""
-    return {"java": "java", "python": "python", "javascript": "js"}.get(
-        language.lower(), ""
-    )
+    return {
+        "java": "java", "python": "python", "javascript": "js",
+        "go": "go", "csharp": "csharp", "cpp": "cpp",
+    }.get(language.lower(), "")
 
 
 _REVIEW_TEMPLATE = """\
