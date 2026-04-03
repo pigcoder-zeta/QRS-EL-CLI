@@ -423,23 +423,31 @@ class AgentR:
     对 CodeQL 的每条发现执行 LLM 语义分析，过滤误报，
     输出带置信度评分的研判结论列表。
 
+    v2.1 升级（受 K-REPRO arXiv:2602.07287 启发）：
+      - 集成 CodeBrowser，使用符号级代码导航替代固定 ±15 行窗口
+      - 自动追踪 Sink 方法定义和关键调用链
+      - 在不超出 token 预算前提下提供最大信息量
+
     Args:
         llm: LangChain LLM 实例；默认使用环境变量中的 ChatOpenAI。
         context_lines: 源码上下文窗口大小（前后各取 N 行）。
+        enable_code_browser: 是否启用 CodeBrowser 智能上下文（默认开启）。
     """
 
     def __init__(
         self,
         llm: Optional[ChatOpenAI] = None,
         context_lines: int = _CONTEXT_LINES,
+        enable_code_browser: bool = True,
     ) -> None:
         import os
         self.llm: ChatOpenAI = llm or ChatOpenAI(
             model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.1,   # 审查任务需要高确定性，使用更低温度
+            temperature=0.1,
             base_url=os.environ.get("OPENAI_BASE_URL") or None,
         )
         self.context_lines = context_lines
+        self.enable_code_browser = enable_code_browser
         self._parser = StrOutputParser()
 
     def _invoke_llm(
@@ -494,6 +502,16 @@ class AgentR:
 
         results: list[ReviewResult] = []
 
+        # 初始化 CodeBrowser（如果启用）
+        code_browser = None
+        if self.enable_code_browser:
+            try:
+                from src.utils.code_browser import CodeBrowser
+                code_browser = CodeBrowser(repo_root=repo_root, language=language)
+                logger.info("[Agent-R] CodeBrowser 已启用，使用智能上下文导航")
+            except Exception as exc:
+                logger.debug("[Agent-R] CodeBrowser 初始化失败，降级为固定窗口: %s", exc)
+
         for idx, finding in enumerate(findings, 1):
             logger.info(
                 "[Agent-R] 审查发现 %d/%d: %s:%d",
@@ -501,13 +519,33 @@ class AgentR:
                 finding.file_uri, finding.start_line,
             )
 
-            # 读取源码上下文
-            finding.code_context = _load_code_context(
-                repo_root=repo_root,
-                file_uri=finding.file_uri,
-                center_line=finding.start_line,
-                window=self.context_lines,
-            )
+            # 读取源码上下文（优先 CodeBrowser 智能导航，降级为固定窗口）
+            if code_browser:
+                try:
+                    finding.code_context = code_browser.build_rich_context(
+                        file_uri=finding.file_uri,
+                        center_line=finding.start_line,
+                        sink_method=finding.message[:80] if finding.message else "",
+                        base_window=self.context_lines,
+                    )
+                    logger.debug(
+                        "[Agent-R] CodeBrowser 上下文: %d 字符（含调用链追踪）",
+                        len(finding.code_context),
+                    )
+                except Exception:
+                    finding.code_context = _load_code_context(
+                        repo_root=repo_root,
+                        file_uri=finding.file_uri,
+                        center_line=finding.start_line,
+                        window=self.context_lines,
+                    )
+            else:
+                finding.code_context = _load_code_context(
+                    repo_root=repo_root,
+                    file_uri=finding.file_uri,
+                    center_line=finding.start_line,
+                    window=self.context_lines,
+                )
 
             # LLM 语义审查（传入语言，使用对应的提示词）
             try:

@@ -376,6 +376,110 @@ class AgentS:
         )
         return result
 
+    def refine_poc(
+        self,
+        previous_poc: PoCResult,
+        error_feedback: str,
+        finding: ReviewResult,
+        iteration: int = 1,
+    ) -> PoCResult:
+        """
+        基于上次 PoC 的执行反馈，生成改进版本（受 K-REPRO 迭代精化启发）。
+
+        K-REPRO (arXiv:2602.07287) 研究表明 LLM Agent 平均需要 4.9 次迭代
+        才能生成有效 PoC，单轮生成的成功率远低于多轮精化。
+
+        Args:
+            previous_poc: 上一轮生成的 PoC。
+            error_feedback: 上次验证的错误信息（HTTP 状态码 / 响应片段 / 失败原因）。
+            finding: 原始漏洞发现。
+            iteration: 当前迭代轮次。
+
+        Returns:
+            改进后的 PoCResult。
+        """
+        logger.info(
+            "[Agent-S] PoC 迭代精化 (第 %d 轮) | 引擎: %s | 位置: %s",
+            iteration, finding.engine_detected, previous_poc.file_location,
+        )
+
+        refine_prompt = f"""\
+【迭代精化 — 第 {iteration} 轮】
+
+上一轮 PoC 执行失败，请分析失败原因并生成改进版。
+
+【失败反馈】
+{error_feedback}
+
+【上一轮 PoC 信息】
+- 引擎:    {previous_poc.engine}
+- Sink:    {previous_poc.sink_method}
+- 位置:    {previous_poc.file_location}
+- Payload: {', '.join(previous_poc.payloads[:3])}
+- HTTP:    {previous_poc.http_trigger}
+
+【漏洞上下文】
+- 置信度:  {finding.confidence:.0%}
+- 推理:    {finding.reasoning}
+
+【源码上下文】
+```
+{finding.finding.code_context or '（不可用）'}
+```
+
+请重新分析漏洞触发路径，特别注意：
+1. HTTP 接口路径是否正确？是否需要特定的 Content-Type 或参数编码？
+2. 参数名是否准确？源码中使用的确切参数名是什么？
+3. Payload 编码是否正确？是否需要 URL 编码 / Base64 / JSON 转义？
+4. 是否需要额外的前置请求（如登录、CSRF Token 获取）？
+5. HTTP 方法（GET/POST/PUT）是否正确？
+
+输出改进后的 JSON 格式 PoC：
+{{
+  "payloads": ["改进的 payload 1", "备用 payload 2"],
+  "http_trigger": {{
+    "method": "GET 或 POST",
+    "path": "/正确的接口路径",
+    "param": "正确的参数名",
+    "example": "完整 curl 命令"
+  }},
+  "expected_output": "成功利用时的预期回显",
+  "severity": "critical | high | medium"
+}}
+"""
+        try:
+            chain = self.llm | self._parser
+            raw = chain.invoke([
+                SystemMessage(content=_SYSTEM_PROMPT_S),
+                HumanMessage(content=refine_prompt),
+            ])
+            poc_data = _parse_poc_json(raw)
+        except Exception as exc:
+            logger.warning("[Agent-S] 迭代精化 LLM 调用失败: %s", exc)
+            poc_data = {}
+            raw = str(exc)
+
+        llm_payloads = poc_data.get("payloads", [])
+        if not llm_payloads:
+            llm_payloads = previous_poc.payloads
+
+        result = PoCResult(
+            engine=previous_poc.engine,
+            sink_method=previous_poc.sink_method,
+            file_location=previous_poc.file_location,
+            payloads=llm_payloads,
+            http_trigger=poc_data.get("http_trigger", previous_poc.http_trigger),
+            expected_output=poc_data.get("expected_output", previous_poc.expected_output),
+            severity=poc_data.get("severity", previous_poc.severity),
+            raw_llm_output=raw if isinstance(raw, str) else "",
+        )
+
+        logger.info(
+            "[Agent-S] 迭代精化完成 (第 %d 轮) | 新 Payload 数: %d",
+            iteration, len(result.payloads),
+        )
+        return result
+
     def generate_all(self, findings: list[ReviewResult]) -> list[PoCResult]:
         """
         批量为所有确认漏洞生成 PoC。

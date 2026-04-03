@@ -275,6 +275,128 @@ class GithubRepoManager:
 
         return found
 
+    # ------------------------------------------------------------------
+    # Patch-Aware 模式（受 K-REPRO arXiv:2602.07287 启发）
+    # ------------------------------------------------------------------
+
+    def checkout_parent_commit(self, repo_path: str, commit_hash: str) -> str:
+        """
+        切换到指定 commit 的父 commit（即漏洞存在的版本）。
+
+        K-REPRO 使用补丁前一个 commit 构建漏洞环境。
+        此方法实现相同策略：给定修复 commit，自动定位到漏洞版本。
+
+        Args:
+            repo_path: 本地仓库路径。
+            commit_hash: 修复补丁的 commit hash。
+
+        Returns:
+            父 commit 的完整 hash。
+
+        Raises:
+            ValueError: commit 不存在或无父 commit。
+        """
+        try:
+            repo = Repo(repo_path)
+            # 先 fetch 完整历史（浅克隆可能不包含目标 commit）
+            try:
+                repo.git.fetch("--unshallow")
+            except GitCommandError:
+                pass  # 已经是完整克隆
+            try:
+                repo.git.fetch("origin", commit_hash)
+            except GitCommandError:
+                pass
+
+            commit = repo.commit(commit_hash)
+            if not commit.parents:
+                raise ValueError(f"Commit {commit_hash} 没有父 commit（可能是初始提交）")
+
+            parent = commit.parents[0]
+            parent_hash = parent.hexsha
+
+            # 切换到父 commit
+            repo.git.checkout(parent_hash, force=True)
+            logger.info(
+                "[Patch-Aware] 已切换到漏洞版本: %s → %s（父 commit）",
+                commit_hash[:12], parent_hash[:12],
+            )
+            return parent_hash
+
+        except (GitCommandError, Exception) as exc:
+            raise ValueError(f"切换到父 commit 失败: {exc}") from exc
+
+    def get_patch_diff(self, repo_path: str, commit_hash: str) -> dict[str, list[str]]:
+        """
+        提取修复补丁中被修改的文件与函数。
+
+        返回 {文件路径: [被修改的函数名列表]} 字典，作为 Agent-Q 的优先分析热区。
+
+        Args:
+            repo_path: 本地仓库路径。
+            commit_hash: 修复补丁的 commit hash。
+
+        Returns:
+            {file_path: [function_name, ...]} 字典。
+        """
+        import re as _re
+
+        try:
+            repo = Repo(repo_path)
+            try:
+                commit = repo.commit(commit_hash)
+            except Exception:
+                repo.git.fetch("origin", commit_hash)
+                commit = repo.commit(commit_hash)
+
+            if not commit.parents:
+                return {}
+
+            parent = commit.parents[0]
+            diff_index = parent.diff(commit, create_patch=True)
+
+            hotspots: dict[str, list[str]] = {}
+
+            for diff_item in diff_index:
+                file_path = diff_item.b_path or diff_item.a_path or ""
+                if not file_path:
+                    continue
+
+                # 从 diff 文本中提取被修改的函数名
+                functions: list[str] = []
+                try:
+                    patch_text = diff_item.diff.decode("utf-8", errors="replace") if diff_item.diff else ""
+                except Exception:
+                    patch_text = ""
+
+                # diff hunk header 通常包含函数名: @@ -10,5 +10,6 @@ void functionName(
+                for hunk_match in _re.finditer(r"@@ .+? @@\s*(.+)", patch_text):
+                    hunk_ctx = hunk_match.group(1).strip()
+                    # 提取函数签名中的名字
+                    func_match = _re.search(r"(?:public|private|protected|static|def|func|function)?\s*[\w<>\[\]*&:]+\s+(\w+)\s*\(", hunk_ctx)
+                    if func_match:
+                        functions.append(func_match.group(1))
+
+                # 去重保序
+                seen: set[str] = set()
+                unique_funcs = []
+                for f in functions:
+                    if f not in seen:
+                        seen.add(f)
+                        unique_funcs.append(f)
+
+                hotspots[file_path] = unique_funcs
+
+            logger.info(
+                "[Patch-Aware] 补丁分析: %d 个文件被修改，提取 %d 个热区函数",
+                len(hotspots), sum(len(v) for v in hotspots.values()),
+            )
+            return hotspots
+
+        except Exception as exc:
+            logger.warning("[Patch-Aware] 补丁分析失败: %s", exc)
+            return {}
+
     def get_repo_head_hash(self, repo_path: str) -> str:
         """
         获取本地仓库 HEAD 提交的 SHA 哈希（前 12 位）。

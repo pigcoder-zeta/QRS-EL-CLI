@@ -88,6 +88,10 @@ class PipelineConfig:
     build_mode: str = ""   # "none" = 跳过编译直接做源码提取（适合构建环境不完整时）
     enable_agent_e: bool = True   # 是否启用 Agent-E 动态沙箱验证
     agent_e_host: Optional[str] = None   # 已运行目标地址（如 http://localhost:8080）
+    # Patch-Aware 模式（受 K-REPRO arXiv:2602.07287 启发）
+    patch_commit: Optional[str] = None   # 修复补丁 commit hash，自动切换到漏洞版本扫描
+    enable_code_browser: bool = True     # Agent-R 是否启用 CodeBrowser 智能上下文
+    prebuilt_db: Optional[str] = None   # 预先建好的 CodeQL 数据库路径，跳过建库阶段
 
     def __post_init__(self) -> None:
         if not self.source_dir and not self.github_url:
@@ -126,6 +130,10 @@ class PipelineState:
     verification_results: list[VerificationResult] = field(default_factory=list)
     completed_phases: list[str] = field(default_factory=list)
     error: Optional[str] = None                 # 非空时表示该次扫描失败
+    # Patch-Aware 模式
+    patch_commit: str = ""                      # 修复补丁 commit hash
+    hotspot_functions: dict = field(default_factory=dict)  # {文件: [函数名]}
+    scan_mode: str = "full"                     # "full" / "patch_aware"
 
     @property
     def vulnerable_findings(self) -> list[ReviewResult]:
@@ -176,7 +184,7 @@ class Coordinator:
             output_dir=config.queries_dir,
             max_retries=config.max_retries,
         )
-        self.agent_r = agent_r or AgentR()
+        self.agent_r = agent_r or AgentR(enable_code_browser=config.enable_code_browser)
         self.agent_s = agent_s or AgentS()
         self.agent_e = AgentE(
             target_host=config.agent_e_host,
@@ -226,17 +234,53 @@ class Coordinator:
         state.commit_hash = commit_hash
         state.build_command = build_cmd
         state.detected_frameworks = frameworks
+
+        # ── Patch-Aware 模式：切换到漏洞版本 + 提取热区函数 ─────────────
+        if self.config.patch_commit:
+            logger.info("[Phase 0] Patch-Aware 模式：分析修复补丁 %s", self.config.patch_commit)
+            try:
+                hotspots = self.repo_manager.get_patch_diff(local_path, self.config.patch_commit)
+                parent_hash = self.repo_manager.checkout_parent_commit(
+                    local_path, self.config.patch_commit
+                )
+                state.patch_commit = self.config.patch_commit
+                state.hotspot_functions = hotspots
+                state.commit_hash = parent_hash[:12]
+                state.scan_mode = "patch_aware"
+                logger.info(
+                    "[Phase 0] Patch-Aware 已激活 | 漏洞版本: %s | 热区文件: %d | 热区函数: %d",
+                    parent_hash[:12], len(hotspots),
+                    sum(len(v) for v in hotspots.values()),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Phase 0] Patch-Aware 模式失败，降级为全量扫描: %s", exc
+                )
+
         state.completed_phases.append("clone_repo")
 
         logger.info(
-            "[Phase 0] 完成 | 构建命令: %s | 检测框架: %s",
+            "[Phase 0] 完成 | 构建命令: %s | 检测框架: %s | 模式: %s",
             build_cmd or "autobuild",
             ", ".join(sorted(frameworks)) if frameworks else "未知",
+            state.scan_mode,
         )
 
     def _phase_create_database(self, state: PipelineState) -> None:
         """Phase 1：创建 CodeQL 数据库（优先命中缓存）。"""
         assert state.source_dir
+
+        # 优先使用预建数据库（--codeql-db 参数指定）
+        if self.config.prebuilt_db:
+            prebuilt = Path(self.config.prebuilt_db)
+            if prebuilt.exists() and (prebuilt / "codeql-database.yml").exists():
+                state.db_path = str(prebuilt)
+                state.db_from_cache = True
+                state.completed_phases.append("create_database")
+                logger.info("[Phase 1] 使用预建 CodeQL 数据库，跳过建库: %s", prebuilt)
+                return
+            else:
+                logger.warning("[Phase 1] 预建数据库路径无效，将重新建库: %s", self.config.prebuilt_db)
 
         if self.config.github_url and state.commit_hash:
             cached = self.db_cache.get(self.config.github_url, state.commit_hash)
@@ -371,7 +415,19 @@ class Coordinator:
 
     def _phase_generate_query(self, state: PipelineState) -> None:
         """Phase 2：Agent-Q 规则生成与编译（优先模板知识库 + 规则记忆 Few-Shot）。"""
-        logger.info("[Phase 2] Agent-Q 生成规则 | 漏洞类型: %s", self.config.vuln_type)
+        mode_label = f" [{state.scan_mode}]" if state.scan_mode != "full" else ""
+        logger.info("[Phase 2] Agent-Q 生成规则 | 漏洞类型: %s%s", self.config.vuln_type, mode_label)
+
+        # Patch-Aware 模式下，将热区函数加入 sink_hints 供 Agent-Q 参考
+        effective_sink_hints = self.config.sink_hints or ""
+        if state.scan_mode == "patch_aware" and state.hotspot_functions:
+            all_funcs = []
+            for funcs in state.hotspot_functions.values():
+                all_funcs.extend(funcs)
+            if all_funcs:
+                hotspot_hint = ", ".join(all_funcs[:10])
+                effective_sink_hints = f"{effective_sink_hints}, {hotspot_hint}" if effective_sink_hints else hotspot_hint
+                logger.info("[Phase 2] Patch-Aware 热区函数注入 Sink Hints: %s", hotspot_hint)
 
         # 从规则记忆库检索 Few-Shot 示例代码（语义检索含 Sink 提示）
         few_shot_examples: list[str] = []
@@ -397,7 +453,7 @@ class Coordinator:
         query_file = self.agent_q.generate_and_compile(
             language=self.config.language,
             vuln_type=self.config.vuln_type,
-            sink_hints=self.config.sink_hints,
+            sink_hints=effective_sink_hints or None,
             few_shot_examples=few_shot_examples or None,
             detected_frameworks=state.detected_frameworks or None,
         )
@@ -519,6 +575,10 @@ class Coordinator:
             vuln_count, len(filtered),
         )
 
+    # 迭代精化最大轮数（受 K-REPRO arXiv:2602.07287 启发：
+    # 成功案例平均 4.9 次迭代，5 轮可覆盖绝大多数场景）
+    _MAX_POC_ITERATIONS: int = 5
+
     def _phase_generate_poc(self, state: PipelineState) -> None:
         """Phase 5：Agent-S PoC 生成（仅对确认漏洞执行）。"""
         if not self.config.enable_agent_s:
@@ -537,7 +597,17 @@ class Coordinator:
         logger.info("[Phase 5] PoC 生成完成 | 共 %d 份", len(poc_results))
 
     def _phase_verify(self, state: PipelineState) -> None:
-        """Phase 6：Agent-E 动态沙箱验证——将 LLM 概率判断升级为运行时确认。"""
+        """
+        Phase 6：Agent-E 动态沙箱验证 + 迭代 PoC 精化循环。
+
+        受 K-REPRO (arXiv:2602.07287) 启发：LLM Agent 平均需要 4.9 次迭代
+        才能生成有效 PoC。本方法实现"生成→验证→反馈→改进"的闭环：
+          1. Agent-E 验证当前 PoC
+          2. 若已确认 → 终止，标记 CONFIRMED
+          3. 若未确认 → 将 HTTP 响应/失败原因反馈给 Agent-S
+          4. Agent-S 基于反馈生成改进版 PoC
+          5. 重复 1-4，最多 _MAX_POC_ITERATIONS 轮
+        """
         if not self.config.enable_agent_e:
             logger.info("[Phase 6] Agent-E 已禁用，跳过动态验证。")
             return
@@ -546,45 +616,112 @@ class Coordinator:
             logger.info("[Phase 6] 无 PoC 需要验证，跳过动态验证。")
             return
 
+        mode = "Remote" if self.config.agent_e_host else "Docker（沙箱）"
         logger.info(
-            "[Phase 6] Agent-E 开始动态验证 | PoC 数: %d | 模式: %s",
-            len(state.poc_results),
-            "Remote" if self.config.agent_e_host else "Docker（沙箱）",
+            "[Phase 6] Agent-E 开始动态验证（迭代精化模式，最多 %d 轮）| PoC 数: %d | 模式: %s",
+            self._MAX_POC_ITERATIONS, len(state.poc_results), mode,
         )
+
+        # 构建 finding → poc 的映射（用于迭代时传回给 Agent-S）
+        finding_map: dict[str, ReviewResult] = {}
+        for finding in state.vulnerable_findings:
+            key = f"{finding.finding.file_uri}:{finding.finding.start_line}"
+            finding_map[key] = finding
 
         verification_results: list[VerificationResult] = []
         confirmed_count = 0
 
-        for poc in state.poc_results:
-            vr = self.agent_e.verify(
-                poc=poc,
-                vuln_type=self.config.vuln_type,
-                repo_path=state.source_dir or "",
-            )
-            verification_results.append(vr)
-            poc.verification_result = vr   # 注入回 PoC 对象
+        for poc_idx, poc in enumerate(state.poc_results):
+            current_poc = poc
+            best_vr = None
 
-            if vr.is_confirmed:
-                confirmed_count += 1
+            for iteration in range(1, self._MAX_POC_ITERATIONS + 1):
                 logger.info(
-                    "[Phase 6] ✅ 100%% 确认真实漏洞 | %s | 证据: %s",
-                    poc.file_location,
-                    vr.evidence[:80] if vr.evidence else "（LLM 分析确认）",
+                    "[Phase 6] PoC %d/%d — 迭代 %d/%d | %s",
+                    poc_idx + 1, len(state.poc_results),
+                    iteration, self._MAX_POC_ITERATIONS,
+                    current_poc.file_location,
                 )
+
+                vr = self.agent_e.verify(
+                    poc=current_poc,
+                    vuln_type=self.config.vuln_type,
+                    repo_path=state.source_dir or "",
+                )
+
+                if vr.is_confirmed:
+                    confirmed_count += 1
+                    current_poc.verification_result = vr
+                    best_vr = vr
+                    logger.info(
+                        "[Phase 6] ✅ 第 %d 轮确认真实漏洞 | %s | 证据: %s",
+                        iteration, current_poc.file_location,
+                        vr.evidence[:80] if vr.evidence else "（LLM 分析确认）",
+                    )
+                    break
+
+                # 保存最佳结果
+                if best_vr is None or (vr.confidence or 0) > (best_vr.confidence or 0):
+                    best_vr = vr
+
+                # 最后一轮不再精化
+                if iteration >= self._MAX_POC_ITERATIONS:
+                    logger.info(
+                        "[Phase 6] ⚠ 达到最大迭代轮数 (%d)，终止精化 | %s",
+                        self._MAX_POC_ITERATIONS, current_poc.file_location,
+                    )
+                    break
+
+                # 若 Agent-E 跳过（无 Docker/Remote），不进入精化循环
+                if vr.status == VerificationStatus.SKIPPED:
+                    logger.info("[Phase 6] Agent-E SKIPPED，不进入迭代精化")
+                    break
+
+                # 构造反馈信息，传给 Agent-S 进行精化
+                feedback = (
+                    f"HTTP 状态码: {vr.response_code}\n"
+                    f"响应片段: {vr.response_snippet[:300]}\n"
+                    f"失败原因: {vr.reason}\n"
+                    f"LLM 分析: {vr.llm_analysis[:200]}"
+                )
+
+                finding = finding_map.get(current_poc.file_location)
+                if finding and self.config.enable_agent_s:
+                    logger.info(
+                        "[Phase 6] → Agent-S 迭代精化 (第 %d → %d 轮)...",
+                        iteration, iteration + 1,
+                    )
+                    try:
+                        current_poc = self.agent_s.refine_poc(
+                            previous_poc=current_poc,
+                            error_feedback=feedback,
+                            finding=finding,
+                            iteration=iteration,
+                        )
+                    except Exception as exc:
+                        logger.warning("[Phase 6] Agent-S 精化失败: %s", exc)
+                        break
+                else:
+                    break
+
+            # 使用最终状态
+            if best_vr:
+                current_poc.verification_result = best_vr
+                verification_results.append(best_vr)
             else:
-                logger.info(
-                    "[Phase 6] ⚠ 未能动态确认 | %s | 状态: %s | 原因: %s",
-                    poc.file_location,
-                    vr.status.value,
-                    vr.reason[:80],
-                )
+                verification_results.append(VerificationResult(
+                    status=VerificationStatus.SKIPPED,
+                    reason="验证过程未产生结果",
+                ))
+
+            # 更新 state 中的 poc（可能已被精化替换）
+            state.poc_results[poc_idx] = current_poc
 
         state.verification_results = verification_results
         state.completed_phases.append("verify")
         logger.info(
-            "[Phase 6] 动态验证完成 | 确认: %d/%d | 后端: %s",
-            confirmed_count, len(state.poc_results),
-            "Docker" if not self.config.agent_e_host else "Remote",
+            "[Phase 6] 动态验证完成（迭代精化模式）| 确认: %d/%d | 后端: %s",
+            confirmed_count, len(state.poc_results), mode,
         )
 
     def _cleanup_clone(self, state: PipelineState) -> None:

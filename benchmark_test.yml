@@ -1,0 +1,51 @@
+# QRSE-X × OWASP Benchmark 测试配置
+# 目标: BenchmarkJava (https://github.com/OWASP-Benchmark/BenchmarkJava)
+#
+# 使用方法:
+#   python -m src.main --config benchmark_test.yml \
+#       --source-dir data\benchmark\BenchmarkJava
+#
+# 评分:
+#   python scripts/score_benchmark.py \
+#       --sarif-dir data/results/benchmark \
+#       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \
+#       --output data/results/benchmark_score.json
+
+language: java
+
+# OWASP Benchmark 覆盖的漏洞类型（映射到 QRSE-X vuln_type）
+# 分批扫描以避免过多并发
+vuln_types:
+  - SQL Injection
+  - Command Injection
+  - Path Traversal
+  - XSS
+  - XXE
+  - Insecure Deserialization
+  - SSRF
+
+# 结果目录（按批次隔离）
+results_dir: data/results/benchmark
+queries_dir: data/queries/benchmark
+
+# Agent-R 配置
+# Benchmark 专用：降低阈值以捕获更多候选（精度由评分脚本统计）
+min_confidence: 0.5
+enable_agent_r: true
+
+# Agent-S/E 在评测中通常禁用（专注于静态检测质量）
+no_agent_s: false
+no_agent_e: true
+
+# Benchmark 是 Maven 项目，可直接构建
+max_retries: 3
+
+# 并发线程数
+parallel_workers: 4
+
+# 报告输出
+output_json: data/results/benchmark/qrse_x_benchmark_full.json
+output_html: data/results/benchmark/qrse_x_benchmark_full.html
+
+# 保留克隆（本地模式 source-dir 不会克隆，此项无效，保留供 GitHub 模式参考）
+no_cleanup: true

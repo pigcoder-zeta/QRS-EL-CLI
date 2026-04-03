@@ -547,6 +547,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--no-build", action="store_true",
         help="跳过项目编译（CodeQL --build-mode=none），适合构建环境不完整或大型 Java 项目",
     )
+    parser.add_argument(
+        "--codeql-db", default=None, metavar="PATH",
+        help="指定已存在的 CodeQL 数据库路径，跳过建库阶段（如 data/databases/benchmark_db）",
+    )
+    # ── Patch-Aware 模式（受 K-REPRO 启发）──────────────────────────
+    parser.add_argument(
+        "--patch-commit", default=None, metavar="HASH",
+        help="修复补丁的 commit hash，自动切换到漏洞版本扫描（Patch-Aware 模式）",
+    )
+    parser.add_argument(
+        "--no-code-browser", action="store_true",
+        help="禁用 Agent-R 的 CodeBrowser 智能上下文（降级为固定 ±15 行窗口）",
+    )
+
     parser.add_argument("--openai-api-key", default=None, metavar="KEY")
     parser.add_argument("--verbose", action="store_true")
 
@@ -690,6 +704,9 @@ def main() -> None:
         build_mode="none" if args.no_build else "",
         enable_agent_e=not args.no_agent_e,
         agent_e_host=getattr(args, "agent_e_host", None),
+        patch_commit=getattr(args, "patch_commit", None),
+        enable_code_browser=not getattr(args, "no_code_browser", False),
+        prebuilt_db=getattr(args, "codeql_db", None),
     )
 
     import time
