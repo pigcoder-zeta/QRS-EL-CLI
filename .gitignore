@@ -22,3 +22,11 @@ data/db_cache.json
 .idea/
 *.DS_Store
 Thumbs.db
+
+# 文档 / 论文（仅本地保留）
+paper.md
+architecture.md
+文档.md
+核心扫描命令.md
+PRD.md
+*.pdf
