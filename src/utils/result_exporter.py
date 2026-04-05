@@ -11,7 +11,7 @@ JSON schema 概览：
   "meta": {
     "generated_at": "ISO8601",
     "tool": "QRSE-X",
-    "version": "0.5.0",
+    "version": "2.4.0",
     "language": "java",
     "total_runs": N,
     "total_vulnerabilities": N
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TOOL_NAME = "QRSE-X"
-_TOOL_VERSION = "0.5.0"
+_TOOL_VERSION = "2.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +150,7 @@ def export_json(
     states: "list[PipelineState]",
     output_path: str,
     language: str = "",
+    codebase_type: str = "",
 ) -> str:
     """
     将一个或多个 PipelineState 导出为 JSON 报告文件。
@@ -166,15 +167,18 @@ def export_json(
         OSError: 写入文件失败时抛出。
     """
     total_vuln = sum(len(s.vulnerable_findings) for s in states)
+    meta: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tool": _TOOL_NAME,
+        "version": _TOOL_VERSION,
+        "language": language,
+        "total_runs": len(states),
+        "total_vulnerabilities": total_vuln,
+    }
+    if codebase_type:
+        meta["codebase_type"] = codebase_type
     report = {
-        "meta": {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "tool": _TOOL_NAME,
-            "version": _TOOL_VERSION,
-            "language": language,
-            "total_runs": len(states),
-            "total_vulnerabilities": total_vuln,
-        },
+        "meta": meta,
         "runs": [_serialize_state(s) for s in states],
     }
 

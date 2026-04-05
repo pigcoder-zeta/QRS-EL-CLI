@@ -87,6 +87,31 @@
       "import_source": "local_scan",
       "verified_at": "",
       "verified_by": ""
+    },
+    {
+      "rule_id": "java_20260403150634",
+      "language": "java",
+      "vuln_type": "Command Injection",
+      "query_path": "data\\rule_memory\\rules\\java_20260403150634_java_Command_Injection_35b8b50f.ql",
+      "created_at": "2026-04-03T15:06:34.381686+00:00",
+      "tags": [
+        "spring"
+      ],
+      "sink_method": "",
+      "data_flow_summary": "",
+      "sarif_message": "Command injection: user-controlled data from [user input](1) flows into OS command.",
+      "code_snippet": "  61 |         }\n  62 |         argList.add(\"echo \" + param);\n  63 | \n  64 |         ProcessBuilder pb = new ProcessBuilder();\n  65 | \n  66 |         pb.command(argList);\n  67 | \n  68 |         try {\n  69 |             Process p = pb.start();\n  70 |             org.owasp.benchmark.helpers.Utils.printOSCommandResults(p, response);\n  71 |         } catch (IOException e) {",
+      "cwe": "CWE-078",
+      "detected_frameworks": [
+        "spring"
+      ],
+      "source_repo": "local://C:\\Users\\23504\\Desktop\\reV\\data\\benchmark\\BenchmarkJava",
+      "source_commit": "",
+      "ql_hash": "30631d4093fd0c0fbc1714cb6565356d452468f69ee5ca2ad3ab7202cd229680",
+      "trust_level": "verified",
+      "import_source": "local_scan",
+      "verified_at": "",
+      "verified_by": ""
     }
   ]
 }

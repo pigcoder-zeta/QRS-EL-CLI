@@ -76,6 +76,11 @@ def page_memory():
     return render_template("memory.html")
 
 
+@app.route("/benchmark")
+def page_benchmark():
+    return render_template("benchmark.html")
+
+
 # ---------------------------------------------------------------------------
 # API — 扫描
 # ---------------------------------------------------------------------------
@@ -336,7 +341,7 @@ def api_system_health():
         "template_count": len(_ALL_TEMPLATES),
         "memory_count": mem.count(),
         "memory_backend": mem.get_backend_name(),
-        "languages": ["java", "python", "javascript", "go", "csharp", "cpp"],
+        "languages": ["java", "python", "javascript", "go", "csharp", "cpp", "solidity"],
     })
 
 
@@ -350,8 +355,152 @@ def api_vuln_catalog():
             "cwe_desc": e.cwe_desc,
             "category": e.category,
             "keywords": list(e.keywords),
+            "description": f"{e.name} ({e.cwe} - {e.cwe_desc})",
         })
     return jsonify(entries)
+
+
+# ---------------------------------------------------------------------------
+# API — Benchmark 评分
+# ---------------------------------------------------------------------------
+
+@app.route("/api/benchmark/score", methods=["POST"])
+def api_benchmark_score():
+    """对指定 SARIF 文件进行 OWASP Benchmark 评分。"""
+    import sys
+    sys.path.insert(0, str(_PROJECT_ROOT))
+    from scripts.score_benchmark import (
+        parse_expected_csv, parse_sarif_findings, compute_score, save_json,
+    )
+    payload = request.get_json(force=True)
+    sarif_path = payload.get("sarif_path", "")
+    expected_csv = payload.get(
+        "expected_csv",
+        str(_PROJECT_ROOT / "data" / "benchmark" / "BenchmarkJava" / "expectedresults-1.2.csv"),
+    )
+
+    sarif_full = _PROJECT_ROOT / sarif_path if not Path(sarif_path).is_absolute() else Path(sarif_path)
+    if not sarif_full.exists():
+        return jsonify({"error": f"SARIF 文件不存在: {sarif_path}"}), 404
+
+    try:
+        expected = parse_expected_csv(str(expected_csv))
+        findings = parse_sarif_findings(str(sarif_full))
+        seen: set[tuple[str, str]] = set()
+        deduped = []
+        for f in findings:
+            key = (f.test_name, f.category)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(f)
+        score = compute_score(expected, deduped)
+        score.sarif_files = 1
+
+        result = {
+            "tool": score.tool_name,
+            "sarif_path": sarif_path,
+            "total_findings": score.total_findings,
+            "overall": {
+                "tp": score.overall_tp, "fp": score.overall_fp,
+                "tn": score.overall_tn, "fn": score.overall_fn,
+                "precision": round(score.overall_precision, 4),
+                "recall": round(score.overall_recall, 4),
+                "f1": round(score.overall_f1, 4),
+                "tpr": round(score.overall_tpr, 4),
+                "fpr": round(score.overall_fpr, 4),
+                "youden": round(score.overall_youden, 4),
+            },
+            "categories": [
+                {
+                    "category": cs.category, "label": cs.label, "cwe": cs.cwe,
+                    "total": cs.total, "real": cs.real, "detected": cs.detected,
+                    "tp": cs.tp, "fp": cs.fp, "tn": cs.tn, "fn": cs.fn,
+                    "precision": round(cs.precision, 4),
+                    "recall": round(cs.recall, 4),
+                    "f1": round(cs.f1, 4),
+                    "tpr": round(cs.tpr, 4),
+                    "fpr": round(cs.fpr, 4),
+                    "youden": round(cs.youden, 4),
+                }
+                for cs in score.categories
+            ],
+        }
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/benchmark/scores")
+def api_benchmark_scores():
+    """返回所有已保存的 Benchmark 评分结果。"""
+    scores = []
+    results_dir = _PROJECT_ROOT / "data" / "results"
+    if results_dir.exists():
+        for f in sorted(results_dir.glob("benchmark_score*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                data["_filename"] = f.name
+                scores.append(data)
+            except Exception:
+                pass
+    return jsonify(scores)
+
+
+# ---------------------------------------------------------------------------
+# API — 一键消融实验
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ablation/start", methods=["POST"])
+def api_ablation_start():
+    """启动一键消融实验套件。"""
+    payload = request.get_json(force=True)
+    required = ["base_sarif", "repo_dir"]
+    for key in required:
+        if not payload.get(key):
+            return jsonify({"error": f"缺少参数: {key}"}), 400
+    suite_id = scan_manager.start_ablation(payload)
+    return jsonify({"suite_id": suite_id})
+
+
+@app.route("/api/ablation/status/<suite_id>")
+def api_ablation_status(suite_id: str):
+    """查询消融实验套件状态。"""
+    suite = scan_manager.get_ablation_suite(suite_id)
+    if not suite:
+        return jsonify({"error": "suite not found"}), 404
+    return jsonify(suite.to_dict())
+
+
+@app.route("/api/ablation/stream/<suite_id>")
+def api_ablation_stream(suite_id: str):
+    """SSE 流：消融实验实时进度。"""
+    def _generate():
+        suite = scan_manager.get_ablation_suite(suite_id)
+        if not suite:
+            yield f"event: error\ndata: {json.dumps({'message': 'suite not found'})}\n\n"
+            return
+        while True:
+            evt = suite.event_queue.get()
+            if evt is None:
+                break
+            yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'], ensure_ascii=False)}\n\n"
+
+    return Response(_generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/codebase-types")
+def api_codebase_types():
+    types = [
+        {"key": "web_app", "label": "Web 应用", "description": "基于 Spring/Django/Express 等框架的 Web 服务"},
+        {"key": "kernel_module", "label": "Linux 内核模块", "description": "Linux 内核驱动、子系统模块"},
+        {"key": "mobile_app", "label": "移动应用", "description": "Android/iOS 应用程序"},
+        {"key": "smart_contract", "label": "智能合约", "description": "Solidity/Vyper 编写的区块链合约"},
+        {"key": "system_service", "label": "系统服务", "description": "C/C++ 系统级守护进程或服务"},
+        {"key": "library", "label": "库/SDK", "description": "通用库或 SDK 代码"},
+        {"key": "firmware", "label": "嵌入式固件", "description": "嵌入式系统或 IoT 设备固件"},
+    ]
+    return jsonify(types)
 
 
 # ---------------------------------------------------------------------------

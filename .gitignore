@@ -12,6 +12,8 @@ venv/
 data/databases/
 data/workspaces/
 data/results/
+data/benchmark/BenchmarkJava/
+data/rule_memory/chroma_db/
 
 # 运行时产生的历史与缓存（每台机器各不相同）
 data/scan_history.json
@@ -23,9 +25,11 @@ data/db_cache.json
 *.DS_Store
 Thumbs.db
 
+# 临时文件
+agent_r_heartbeat.log
+0
+
 # 文档 / 论文（仅本地保留）
-paper.md
-architecture.md
 文档.md
 核心扫描命令.md
 PRD.md

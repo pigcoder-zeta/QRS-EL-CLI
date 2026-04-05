@@ -42,6 +42,7 @@
       <span class="w-2 h-2 rounded-full bg-yellow-400 inline-block"></span> 不确定
     </button>
     <div class="flex-1"></div>
+    <span id="filter-counter" class="text-xs text-gray-400 font-mono"></span>
     <input id="finding-search" class="form-input text-xs py-1 w-48" placeholder="搜索 finding..." oninput="applyFilters()" />
     <select id="finding-sort" class="form-select text-xs py-1 w-32" onchange="applyFilters()">
       <option value="default">默认排序</option>
@@ -49,6 +50,22 @@
       <option value="confidence-asc">置信度 ↑</option>
       <option value="file">按文件名</option>
     </select>
+  </div>
+</div>
+
+<!-- Benchmark Score Panel (auto-shown when scores exist) -->
+<div id="benchmark-panel" class="hidden mb-6">
+  <div class="card">
+    <div class="card-header">
+      <span class="font-semibold text-sm">OWASP Benchmark 评分对比</span>
+      <button class="btn btn-sm btn-secondary" onclick="loadBenchmarkScores()">刷新</button>
+    </div>
+    <div class="card-body">
+      <div id="benchmark-compare-table"></div>
+      <div class="mt-4" style="max-height:320px">
+        <canvas id="chart-benchmark-cwe"></canvas>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -70,8 +87,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const meta = data.meta || {};
   const runs = data.runs || [];
 
+  const cbType = meta.codebase_type ? ` | ${meta.codebase_type}` : '';
   document.getElementById('report-subtitle').textContent =
-    `${meta.language || ''} | ${meta.total_runs || runs.length} 个扫描任务 | ${meta.generated_at ? new Date(meta.generated_at).toLocaleString('zh-CN') : ''}`;
+    `${meta.language || ''} | ${meta.total_runs || runs.length} 个扫描任务 | ${meta.generated_at ? new Date(meta.generated_at).toLocaleString('zh-CN') : ''}${cbType}`;
   document.getElementById('btn-download').href = `/api/results/${FILENAME}`;
 
   // Summary stats
@@ -126,6 +144,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             <div><span class="text-gray-500">Commit:</span> <span class="text-gray-300 font-mono">${(run.commit_hash || '').slice(0, 8) || '-'}</span></div>
             <div><span class="text-gray-500">缓存:</span> <span class="text-gray-300">${run.db_from_cache ? '是' : '否'}</span></div>
             <div><span class="text-gray-500">阶段:</span> <span class="text-gray-300">${(run.completed_phases || []).length}/7</span></div>
+            ${run.codebase_type ? `<div><span class="text-gray-500">代码库:</span> <span class="badge badge-purple">${escapeHtml(run.codebase_type)}</span></div>` : ''}
           </div>
           ${run.error ? `<div class="bg-red-900/20 border border-red-800 rounded p-3 text-red-400 text-sm mb-4">${escapeHtml(run.error)}</div>` : ''}
           <div class="flex gap-6">
@@ -249,5 +268,88 @@ function applyFilters() {
   const counter = document.getElementById('filter-counter');
   if (counter) counter.textContent = `${visible}/${total}`;
 }
+
+// --- Benchmark scoring ---
+let benchmarkChart = null;
+
+async function loadBenchmarkScores() {
+  try {
+    const res = await fetch('/api/benchmark/scores');
+    if (!res.ok) return;
+    const scores = await res.json();
+    if (!scores || scores.length === 0) return;
+
+    document.getElementById('benchmark-panel').classList.remove('hidden');
+    renderBenchmarkTable(scores);
+    renderBenchmarkChart(scores);
+  } catch(e) {}
+}
+
+function renderBenchmarkTable(scores) {
+  const container = document.getElementById('benchmark-compare-table');
+  let html = `<div class="overflow-x-auto"><table class="data-table text-xs">
+    <thead><tr>
+      <th>配置</th><th>TP</th><th>FP</th><th>TN</th><th>FN</th>
+      <th>Precision</th><th>Recall</th><th>F1</th><th>FPR</th><th>Youden</th>
+    </tr></thead><tbody>`;
+
+  scores.forEach(s => {
+    const o = s.overall || {};
+    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '') || s.tool || 'unknown';
+    const yClass = o.youden > 0.7 ? 'text-green-400' : o.youden > 0.4 ? 'text-yellow-400' : 'text-red-400';
+    html += `<tr>
+      <td class="font-medium text-brand-500">${escapeHtml(name)}</td>
+      <td class="text-green-400">${o.tp||0}</td>
+      <td class="text-red-400">${o.fp||0}</td>
+      <td>${o.tn||0}</td>
+      <td>${o.fn||0}</td>
+      <td>${((o.precision||0)*100).toFixed(1)}%</td>
+      <td>${((o.recall||0)*100).toFixed(1)}%</td>
+      <td class="font-semibold">${(o.f1||0).toFixed(3)}</td>
+      <td class="text-red-400">${((o.fpr||0)*100).toFixed(1)}%</td>
+      <td class="${yClass} font-semibold">${o.youden >= 0 ? '+' : ''}${(o.youden||0).toFixed(3)}</td>
+    </tr>`;
+  });
+
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+function renderBenchmarkChart(scores) {
+  if (scores.length === 0) return;
+  const best = scores[scores.length - 1];
+  const cats = best.categories || [];
+  if (cats.length === 0) return;
+
+  const labels = cats.map(c => c.label || c.category);
+  const f1Data = cats.map(c => c.f1 || 0);
+  const youdenData = cats.map(c => c.youden || 0);
+
+  const ctx = document.getElementById('chart-benchmark-cwe');
+  if (benchmarkChart) benchmarkChart.destroy();
+  benchmarkChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'F1 Score', data: f1Data, backgroundColor: 'rgba(96,165,250,0.7)', borderRadius: 4 },
+        { label: 'Youden Index', data: youdenData, backgroundColor: 'rgba(74,222,128,0.7)', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: '#9ca3af', font: {size: 10} }, grid: { display: false } },
+        y: { beginAtZero: true, max: 1.1, ticks: { color: '#6b7280' }, grid: { color: 'rgba(55,65,81,0.3)' } }
+      },
+      plugins: {
+        legend: { labels: { color: '#9ca3af', usePointStyle: true } },
+        tooltip: { backgroundColor: '#1f2937', titleColor: '#e5e7eb', bodyColor: '#d1d5db' }
+      }
+    }
+  });
+}
+
+loadBenchmarkScores();
 </script>
 {% endblock %}

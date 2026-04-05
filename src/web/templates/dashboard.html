@@ -29,7 +29,7 @@
 </div>
 
 <!-- Stat cards -->
-<div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6" id="stat-cards">
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6" id="stat-cards">
   <div class="stat-card">
     <div class="stat-value text-brand-500" id="stat-scans">-</div>
     <div class="stat-label">历史扫描</div>
@@ -45,6 +45,10 @@
   <div class="stat-card">
     <div class="stat-value text-yellow-400" id="stat-memory">-</div>
     <div class="stat-label">规则记忆</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value text-purple-400" id="stat-catalog">-</div>
+    <div class="stat-label">漏洞目录</div>
   </div>
 </div>
 
@@ -104,6 +108,7 @@
           <option value="go">Go</option>
           <option value="csharp">C#</option>
           <option value="cpp">C++</option>
+          <option value="solidity">Solidity</option>
         </select>
         <input id="filter-scan-text" class="form-input text-xs py-0.5 w-32" placeholder="搜索..." oninput="filterScans()" />
       </div>
@@ -168,18 +173,19 @@
 <script>
 let allResults = [];
 let sortKey = 'time', sortDir = -1;
-let trendChart = null, vulnChart = null;
+let trendChart = null, vulnChart = null, langChart = null;
 const REFRESH_MS = 30000;
 
 document.addEventListener('DOMContentLoaded', () => { loadAll(); setInterval(loadAll, REFRESH_MS); });
 
 async function loadAll() {
-  const [resultsRes, healthRes, memRes] = await Promise.all([
-    fetch('/api/results'), fetch('/api/system/health'), fetch('/api/memory'),
+  const [resultsRes, healthRes, memRes, catalogRes] = await Promise.all([
+    fetch('/api/results'), fetch('/api/system/health'), fetch('/api/memory'), fetch('/api/vuln-catalog'),
   ]);
   allResults = await resultsRes.json();
   const health = await healthRes.json();
   const mem = await memRes.json();
+  const catalog = await catalogRes.json().catch(() => []);
 
   // Stats
   document.getElementById('stat-scans').textContent = allResults.length;
@@ -187,6 +193,7 @@ async function loadAll() {
   document.getElementById('stat-vulns').textContent = totalVulns;
   document.getElementById('stat-templates').textContent = health.template_count;
   document.getElementById('stat-memory').textContent = mem.total || 0;
+  document.getElementById('stat-catalog').textContent = Array.isArray(catalog) ? catalog.length : 0;
   document.getElementById('scan-count-badge').textContent = allResults.length;
 
   // System
@@ -335,15 +342,16 @@ function renderTrendChart(days) {
 
 // --- Mode C: Language coverage radar ---
 function renderLangChart(health) {
-  const langNames = ['Java','Python','JavaScript','Go','C#','C++'];
-  const langKeys = ['java','python','javascript','go','csharp','cpp'];
+  const langNames = ['Java','Python','JavaScript','Go','C#','C++','Solidity'];
+  const langKeys = ['java','python','javascript','go','csharp','cpp','solidity'];
   const tplCount = {};
   fetch('/api/templates').then(r=>r.json()).then(data => {
     (data.templates||[]).forEach(t => { tplCount[t.language] = (tplCount[t.language]||0)+1; });
     const scanCount = {};
     allResults.forEach(r => { if(r.language) scanCount[r.language] = (scanCount[r.language]||0)+1; });
     const ctx = document.getElementById('chart-lang');
-    new Chart(ctx, {
+    if (langChart) langChart.destroy();
+    langChart = new Chart(ctx, {
       type: 'radar',
       data: {
         labels: langNames,

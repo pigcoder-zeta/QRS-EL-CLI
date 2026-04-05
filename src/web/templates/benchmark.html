@@ -1,0 +1,506 @@
+{% extends "layout.html" %}
+{% block title %}QRSE-X - Benchmark 评分{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h2 class="text-2xl font-bold">OWASP Benchmark 评分</h2>
+    <p class="text-gray-500 text-sm mt-1">对比各配置的 TP/FP/Precision/Recall/F1/Youden 指标</p>
+  </div>
+  <div class="flex gap-2">
+    <button class="btn btn-primary btn-sm" onclick="showScoreDialog()">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      新建评分
+    </button>
+    <button class="btn btn-sm" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff" onclick="showAblationDialog()">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
+      一键消融实验
+    </button>
+    <button class="btn btn-secondary btn-sm" onclick="loadScores()">刷新</button>
+  </div>
+</div>
+
+<!-- Score dialog -->
+<div id="score-dialog" class="card mb-4 hidden">
+  <div class="card-header">
+    <span class="font-semibold text-sm">对 SARIF 文件评分</span>
+    <button class="text-gray-500 hover:text-gray-300" onclick="document.getElementById('score-dialog').classList.add('hidden')">&times;</button>
+  </div>
+  <div class="card-body space-y-3">
+    <div>
+      <label class="form-label">SARIF 文件路径</label>
+      <input id="input-sarif-path" class="form-input" placeholder="data/results/benchmark/sarif_agent_r_allcwe.sarif" />
+    </div>
+    <div>
+      <label class="form-label">标准答案 CSV</label>
+      <input id="input-expected-csv" class="form-input" value="data/benchmark/BenchmarkJava/expectedresults-1.2.csv" />
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-primary btn-sm" onclick="runScore()">开始评分</button>
+      <span id="score-status" class="text-xs text-gray-500 self-center"></span>
+    </div>
+    <div id="score-live-result" class="hidden"></div>
+  </div>
+</div>
+
+<!-- Ablation dialog -->
+<div id="ablation-dialog" class="card mb-4 hidden" style="border-color:#6366f1">
+  <div class="card-header" style="background:linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.10))">
+    <span class="font-semibold text-sm" style="color:#a5b4fc">一键消融实验配置</span>
+    <button class="text-gray-500 hover:text-gray-300" onclick="document.getElementById('ablation-dialog').classList.add('hidden')">&times;</button>
+  </div>
+  <div class="card-body space-y-3">
+    <p class="text-xs text-gray-500">自动执行 5 组消融变体（Full / w/o Agent-R / w/o CodeBrowser / w/o RAG / w/o Prompt Tuning），并对每组结果自动评分。</p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div>
+        <label class="form-label">原始 SARIF 路径</label>
+        <input id="abl-sarif" class="form-input" value="data/results/benchmark/sarif_all_cwe.sarif" />
+      </div>
+      <div>
+        <label class="form-label">源码仓库路径</label>
+        <input id="abl-repo" class="form-input" value="data/benchmark/BenchmarkJava" />
+      </div>
+      <div>
+        <label class="form-label">标准答案 CSV</label>
+        <input id="abl-csv" class="form-input" value="data/benchmark/BenchmarkJava/expectedresults-1.2.csv" />
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="form-label">并发 Workers</label>
+          <input id="abl-workers" class="form-input" type="number" value="4" min="1" max="16" />
+        </div>
+        <div>
+          <label class="form-label">Batch Size</label>
+          <input id="abl-batch" class="form-input" type="number" value="10" min="1" max="50" />
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-2 items-center">
+      <button id="abl-start-btn" class="btn btn-sm" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff" onclick="startAblation()">
+        开始实验
+      </button>
+      <span id="abl-status-msg" class="text-xs text-gray-500"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Ablation progress panel -->
+<div id="ablation-progress" class="card mb-6 hidden" style="border-color:#6366f1">
+  <div class="card-header" style="background:linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.10))">
+    <span class="font-semibold text-sm" style="color:#a5b4fc">消融实验进度</span>
+    <span id="abl-suite-status" class="badge badge-blue text-xs">等待中</span>
+  </div>
+  <div class="card-body space-y-2" id="abl-tasks-container">
+  </div>
+  <div id="abl-log-panel" class="border-t border-gray-700 p-3 max-h-40 overflow-y-auto text-xs font-mono text-gray-400 hidden">
+  </div>
+</div>
+
+<!-- Overall comparison table -->
+<div class="card mb-6">
+  <div class="card-header">
+    <span class="font-semibold text-sm">总体对比</span>
+    <span class="badge badge-blue" id="score-count">0</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="overflow-x-auto">
+      <table class="data-table text-sm">
+        <thead><tr>
+          <th>配置</th>
+          <th>Findings</th>
+          <th class="text-green-400">TP</th>
+          <th class="text-red-400">FP</th>
+          <th>TN</th>
+          <th>FN</th>
+          <th>Precision</th>
+          <th>Recall</th>
+          <th>F1</th>
+          <th>FPR</th>
+          <th>Youden</th>
+        </tr></thead>
+        <tbody id="compare-tbody">
+          <tr><td colspan="11" class="text-center text-gray-600 py-6">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Per-category charts -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+  <div class="card">
+    <div class="card-header"><span class="font-semibold text-sm">各 CWE 类别 F1 Score</span></div>
+    <div class="card-body" style="min-height:300px">
+      <canvas id="chart-f1"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="font-semibold text-sm">各 CWE 类别 Youden Index</span></div>
+    <div class="card-body" style="min-height:300px">
+      <canvas id="chart-youden"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- Per-category detail table -->
+<div class="card">
+  <div class="card-header">
+    <span class="font-semibold text-sm">各类别明细 (最新评分)</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="overflow-x-auto">
+      <table class="data-table text-xs">
+        <thead><tr>
+          <th>Category</th><th>CWE</th><th>Total</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th>
+          <th>Precision</th><th>Recall</th><th>F1</th><th>FPR</th><th>Youden</th>
+        </tr></thead>
+        <tbody id="detail-tbody">
+          <tr><td colspan="12" class="text-center text-gray-600 py-6">暂无数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allScores = [];
+let chartF1 = null, chartYouden = null;
+
+document.addEventListener('DOMContentLoaded', loadScores);
+
+async function loadScores() {
+  try {
+    const res = await fetch('/api/benchmark/scores');
+    allScores = await res.json();
+    document.getElementById('score-count').textContent = allScores.length;
+    renderCompareTable();
+    renderCharts();
+    renderDetailTable();
+  } catch(e) {
+    document.getElementById('compare-tbody').innerHTML =
+      '<tr><td colspan="11" class="text-center text-red-400 py-6">加载失败</td></tr>';
+  }
+}
+
+function renderCompareTable() {
+  const tbody = document.getElementById('compare-tbody');
+  if (allScores.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-gray-600 py-6">暂无评分记录，点击"新建评分"开始</td></tr>';
+    return;
+  }
+  tbody.innerHTML = allScores.map(s => {
+    const o = s.overall || {};
+    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    const yClass = o.youden > 0.7 ? 'text-green-400' : o.youden > 0.4 ? 'text-yellow-400' : 'text-red-400';
+    return `<tr>
+      <td class="font-medium text-brand-500 whitespace-nowrap">${esc(name)}</td>
+      <td>${s.total_findings || 0}</td>
+      <td class="text-green-400 font-semibold">${o.tp||0}</td>
+      <td class="text-red-400 font-semibold">${o.fp||0}</td>
+      <td>${o.tn||0}</td>
+      <td>${o.fn||0}</td>
+      <td>${pct(o.precision)}</td>
+      <td>${pct(o.recall)}</td>
+      <td class="font-bold">${(o.f1||0).toFixed(3)}</td>
+      <td class="text-red-400">${pct(o.fpr)}</td>
+      <td class="${yClass} font-bold">${o.youden>=0?'+':''}${(o.youden||0).toFixed(3)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderCharts() {
+  if (allScores.length === 0) return;
+  const latest = allScores[allScores.length - 1];
+  const cats = latest.categories || [];
+  if (cats.length === 0) return;
+
+  const labels = cats.map(c => c.label || c.category);
+  const colors = ['rgba(96,165,250,0.8)','rgba(248,113,113,0.8)','rgba(74,222,128,0.8)','rgba(250,204,21,0.8)','rgba(192,132,252,0.8)'];
+
+  // F1 chart — show all scores for comparison
+  const f1Datasets = allScores.map((s, i) => {
+    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    return {
+      label: name,
+      data: (s.categories || []).map(c => c.f1 || 0),
+      backgroundColor: colors[i % colors.length],
+      borderRadius: 3,
+    };
+  });
+  const ctxF1 = document.getElementById('chart-f1');
+  if (chartF1) chartF1.destroy();
+  chartF1 = new Chart(ctxF1, {
+    type: 'bar',
+    data: { labels, datasets: f1Datasets },
+    options: chartOpts('F1 Score', 1.1),
+  });
+
+  // Youden chart
+  const yDatasets = allScores.map((s, i) => {
+    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    return {
+      label: name,
+      data: (s.categories || []).map(c => c.youden || 0),
+      backgroundColor: colors[i % colors.length],
+      borderRadius: 3,
+    };
+  });
+  const ctxY = document.getElementById('chart-youden');
+  if (chartYouden) chartYouden.destroy();
+  chartYouden = new Chart(ctxY, {
+    type: 'bar',
+    data: { labels, datasets: yDatasets },
+    options: chartOpts('Youden Index', 1.1),
+  });
+}
+
+function chartOpts(title, max) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { ticks: { color: '#9ca3af', font: {size:10}, maxRotation: 45 }, grid: { display: false } },
+      y: { beginAtZero: true, max, ticks: { color: '#6b7280' }, grid: { color: 'rgba(55,65,81,0.3)' } },
+    },
+    plugins: {
+      legend: { labels: { color: '#9ca3af', usePointStyle: true, pointStyleWidth: 8, font: {size:11} } },
+      tooltip: { backgroundColor: '#1f2937', titleColor: '#e5e7eb', bodyColor: '#d1d5db' },
+    },
+  };
+}
+
+function renderDetailTable() {
+  const tbody = document.getElementById('detail-tbody');
+  if (allScores.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-gray-600 py-6">暂无数据</td></tr>';
+    return;
+  }
+  const latest = allScores[allScores.length - 1];
+  const cats = latest.categories || [];
+  tbody.innerHTML = cats.map(c => {
+    const yClass = c.youden > 0.7 ? 'text-green-400' : c.youden > 0.4 ? 'text-yellow-400' : 'text-red-400';
+    const flag = c.youden > 0.5 ? '[+]' : c.youden > 0 ? '[~]' : '[-]';
+    return `<tr>
+      <td class="font-medium text-gray-200">${esc(c.label || c.category)}</td>
+      <td class="text-gray-500">${c.cwe||''}</td>
+      <td>${c.total}</td>
+      <td class="text-green-400">${c.tp}</td>
+      <td class="text-red-400">${c.fp}</td>
+      <td class="text-yellow-400">${c.fn}</td>
+      <td>${c.tn}</td>
+      <td>${pct(c.precision)}</td>
+      <td>${pct(c.recall)}</td>
+      <td class="font-semibold">${(c.f1||0).toFixed(3)}</td>
+      <td class="text-red-400">${pct(c.fpr)}</td>
+      <td class="${yClass} font-semibold">${c.youden>=0?'+':''}${(c.youden||0).toFixed(3)} ${flag}</td>
+    </tr>`;
+  }).join('');
+}
+
+function showScoreDialog() {
+  document.getElementById('score-dialog').classList.remove('hidden');
+}
+
+async function runScore() {
+  const sarifPath = document.getElementById('input-sarif-path').value.trim();
+  const expectedCsv = document.getElementById('input-expected-csv').value.trim();
+  if (!sarifPath) { alert('请输入 SARIF 文件路径'); return; }
+
+  document.getElementById('score-status').textContent = '评分中...';
+  try {
+    const res = await fetch('/api/benchmark/score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sarif_path: sarifPath, expected_csv: expectedCsv }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      document.getElementById('score-status').textContent = '错误: ' + data.error;
+      return;
+    }
+    document.getElementById('score-status').textContent = `完成! F1=${(data.overall.f1||0).toFixed(3)} Youden=${data.overall.youden>=0?'+':''}${(data.overall.youden||0).toFixed(3)}`;
+    document.getElementById('score-dialog').classList.add('hidden');
+    loadScores();
+  } catch(e) {
+    document.getElementById('score-status').textContent = '请求失败: ' + e.message;
+  }
+}
+
+function pct(v) { return ((v||0)*100).toFixed(1) + '%'; }
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// 一键消融实验
+// ---------------------------------------------------------------------------
+const ABL_VARIANTS = [
+  { name:'full',             label:'Full QRSE-X',       icon:'🔬' },
+  { name:'no_agent_r',       label:'w/o Agent-R',       icon:'🚫' },
+  { name:'no_codebrowser',   label:'w/o CodeBrowser',   icon:'📖' },
+  { name:'no_rag',           label:'w/o RAG',           icon:'🗃️' },
+  { name:'no_prompt_tuning', label:'w/o Prompt Tuning', icon:'📝' },
+];
+let ablSuiteId = null;
+let ablEventSource = null;
+
+function showAblationDialog() {
+  document.getElementById('ablation-dialog').classList.remove('hidden');
+}
+
+async function startAblation() {
+  const btn = document.getElementById('abl-start-btn');
+  const msg = document.getElementById('abl-status-msg');
+  btn.disabled = true;
+  msg.textContent = '启动中...';
+
+  const payload = {
+    base_sarif: document.getElementById('abl-sarif').value.trim(),
+    repo_dir:   document.getElementById('abl-repo').value.trim(),
+    expected_csv: document.getElementById('abl-csv').value.trim(),
+    language:   'java',
+    workers:    parseInt(document.getElementById('abl-workers').value) || 4,
+    batch:      parseInt(document.getElementById('abl-batch').value) || 10,
+  };
+
+  if (!payload.base_sarif || !payload.repo_dir) {
+    msg.textContent = '请填写 SARIF 路径和源码路径';
+    btn.disabled = false;
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/ablation/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.error) {
+      msg.textContent = '错误: ' + data.error;
+      btn.disabled = false;
+      return;
+    }
+    ablSuiteId = data.suite_id;
+    msg.textContent = 'Suite ID: ' + ablSuiteId;
+    document.getElementById('ablation-dialog').classList.add('hidden');
+    initProgressPanel();
+    connectAblSSE(ablSuiteId);
+  } catch(e) {
+    msg.textContent = '请求失败: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+function initProgressPanel() {
+  const panel = document.getElementById('ablation-progress');
+  panel.classList.remove('hidden');
+  document.getElementById('abl-suite-status').textContent = '运行中';
+  document.getElementById('abl-suite-status').className = 'badge badge-yellow text-xs';
+
+  const container = document.getElementById('abl-tasks-container');
+  container.innerHTML = ABL_VARIANTS.map((v, i) => `
+    <div id="abl-task-${i}" class="flex items-center gap-3 p-2 rounded" style="background:rgba(31,41,55,0.5)">
+      <span class="text-lg">${v.icon}</span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-sm font-medium text-gray-200">${esc(v.label)}</span>
+          <span id="abl-task-badge-${i}" class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400">等待中</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-1.5">
+          <div id="abl-task-bar-${i}" class="h-1.5 rounded-full transition-all duration-500" style="width:0%;background:#6366f1"></div>
+        </div>
+        <div id="abl-task-score-${i}" class="text-xs text-gray-500 mt-1 hidden"></div>
+      </div>
+    </div>
+  `).join('');
+
+  document.getElementById('abl-log-panel').classList.remove('hidden');
+  document.getElementById('abl-log-panel').innerHTML = '';
+}
+
+function connectAblSSE(suiteId) {
+  if (ablEventSource) ablEventSource.close();
+  ablEventSource = new EventSource('/api/ablation/stream/' + suiteId);
+
+  ablEventSource.addEventListener('task_update', function(e) {
+    const d = JSON.parse(e.data);
+    updateTaskUI(d.index, d.status, d.label, d.score, d.error);
+  });
+
+  ablEventSource.addEventListener('log', function(e) {
+    const d = JSON.parse(e.data);
+    appendAblLog(d.message);
+  });
+
+  ablEventSource.addEventListener('complete', function(e) {
+    const badge = document.getElementById('abl-suite-status');
+    badge.textContent = '已完成';
+    badge.className = 'badge badge-green text-xs';
+    ablEventSource.close();
+    ablEventSource = null;
+    document.getElementById('abl-start-btn').disabled = false;
+    loadScores();
+  });
+
+  ablEventSource.addEventListener('error', function(e) {
+    if (ablEventSource.readyState === EventSource.CLOSED) return;
+    const badge = document.getElementById('abl-suite-status');
+    badge.textContent = '出错';
+    badge.className = 'badge badge-red text-xs';
+    ablEventSource.close();
+    ablEventSource = null;
+    document.getElementById('abl-start-btn').disabled = false;
+  });
+}
+
+function updateTaskUI(idx, status, label, score, error) {
+  const badge = document.getElementById('abl-task-badge-' + idx);
+  const bar   = document.getElementById('abl-task-bar-' + idx);
+  const scoreEl = document.getElementById('abl-task-score-' + idx);
+
+  if (status === 'running') {
+    badge.textContent = '运行中';
+    badge.className = 'text-xs px-2 py-0.5 rounded-full bg-indigo-900 text-indigo-300 animate-pulse';
+    bar.style.width = '60%';
+    bar.style.background = '#6366f1';
+  } else if (status === 'completed') {
+    badge.textContent = '完成';
+    badge.className = 'text-xs px-2 py-0.5 rounded-full bg-green-900 text-green-300';
+    bar.style.width = '100%';
+    bar.style.background = '#22c55e';
+    if (score) {
+      scoreEl.classList.remove('hidden');
+      scoreEl.innerHTML = `<span class="text-green-400 font-semibold">F1=${(score.f1||0).toFixed(3)}</span>`
+        + ` <span class="text-gray-500">|</span> `
+        + `<span class="${score.youden>0.7?'text-green-400':score.youden>0.4?'text-yellow-400':'text-red-400'}">Youden=${score.youden>=0?'+':''}${(score.youden||0).toFixed(3)}</span>`
+        + ` <span class="text-gray-500">|</span> `
+        + `<span>TP=${score.tp} FP=${score.fp} Prec=${pct(score.precision)} Rec=${pct(score.recall)}</span>`;
+    }
+  } else if (status === 'error') {
+    badge.textContent = '失败';
+    badge.className = 'text-xs px-2 py-0.5 rounded-full bg-red-900 text-red-300';
+    bar.style.width = '100%';
+    bar.style.background = '#ef4444';
+    if (error) {
+      scoreEl.classList.remove('hidden');
+      scoreEl.innerHTML = `<span class="text-red-400">${esc(error).slice(0,120)}</span>`;
+    }
+  }
+}
+
+function appendAblLog(msg) {
+  const panel = document.getElementById('abl-log-panel');
+  const line = document.createElement('div');
+  line.textContent = msg;
+  if (msg.includes('[Ablation]')) line.style.color = '#a5b4fc';
+  panel.appendChild(line);
+  panel.scrollTop = panel.scrollHeight;
+  if (panel.children.length > 200) panel.removeChild(panel.firstChild);
+}
+</script>
+{% endblock %}

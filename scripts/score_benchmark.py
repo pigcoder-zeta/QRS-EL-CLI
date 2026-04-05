@@ -397,7 +397,7 @@ def print_score_table(score: BenchmarkScore) -> None:
 
     for cs in score.categories:
         youden_str = f"{cs.youden:+.3f}"
-        flag = " ★" if cs.youden > 0.5 else (" △" if cs.youden > 0 else " ✗")
+        flag = " [+]" if cs.youden > 0.5 else (" [~]" if cs.youden > 0 else " [-]")
         print(
             f"| {cs.label:<16} | {cs.total:>5} | {cs.tp:>4} | {cs.fp:>4} |"
             f" {cs.fn:>4} | {cs.tn:>4} | {cs.precision:>6.1%} | {cs.recall:>6.1%} |"

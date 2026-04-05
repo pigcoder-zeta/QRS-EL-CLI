@@ -92,6 +92,11 @@ class PipelineConfig:
     patch_commit: Optional[str] = None   # 修复补丁 commit hash，自动切换到漏洞版本扫描
     enable_code_browser: bool = True     # Agent-R 是否启用 CodeBrowser 智能上下文
     prebuilt_db: Optional[str] = None   # 预先建好的 CodeQL 数据库路径，跳过建库阶段
+    agent_r_workers: int = 1            # Agent-R 并发线程数（1=串行，建议 2~4）
+    agent_r_batch: int = 1              # Agent-R 每次 LLM 调用包含的 finding 数（建议 5~10）
+    external_sarif: Optional[str] = None  # 外部 SARIF 文件路径（Checkov/tfsec/Trivy 等输出），跳过 Agent-Q + CodeQL 阶段
+    prompt_preset: str = ""              # Agent-T 指定的 prompt 预设（如 "kernel"），传递给 Agent-R/Q
+    agent_r_context_lines: int = 30      # Agent-R 上下文窗口大小（Agent-T 可按代码库类型调整）
 
     def __post_init__(self) -> None:
         if not self.source_dir and not self.github_url:
@@ -184,7 +189,10 @@ class Coordinator:
             output_dir=config.queries_dir,
             max_retries=config.max_retries,
         )
-        self.agent_r = agent_r or AgentR(enable_code_browser=config.enable_code_browser)
+        self.agent_r = agent_r or AgentR(
+            enable_code_browser=config.enable_code_browser,
+            context_lines=config.agent_r_context_lines,
+        )
         self.agent_s = agent_s or AgentS()
         self.agent_e = AgentE(
             target_host=config.agent_e_host,
@@ -456,6 +464,7 @@ class Coordinator:
             sink_hints=effective_sink_hints or None,
             few_shot_examples=few_shot_examples or None,
             detected_frameworks=state.detected_frameworks or None,
+            prompt_preset=self.config.prompt_preset,
         )
         state.query_path = str(query_file)
         state.completed_phases.append("generate_query")
@@ -548,11 +557,17 @@ class Coordinator:
 
         assert state.sarif_path and state.source_dir
 
-        logger.info("[Phase 4] Agent-R 开始语义审查 (语言: %s)...", self.config.language)
+        logger.info(
+            "[Phase 4] Agent-R 开始语义审查 (语言: %s, workers: %d, batch: %d)...",
+            self.config.language, self.config.agent_r_workers, self.config.agent_r_batch,
+        )
         all_results = self.agent_r.review(
             sarif_path=state.sarif_path,
             repo_root=state.source_dir,
             language=self.config.language,
+            parallel_workers=self.config.agent_r_workers,
+            batch_size=self.config.agent_r_batch,
+            prompt_preset=self.config.prompt_preset,
         )
 
         filtered = [
@@ -757,21 +772,39 @@ class Coordinator:
             )
 
         try:
-            if self.config.github_url:
-                self._phase_clone_repo(state)
+            # 外部 SARIF 模式：跳过 Phase 0~3（克隆/建库/生成查询/扫描），
+            # 直接用 Checkov/tfsec/Trivy/Semgrep 等工具的 SARIF 输出进入 Agent-R 审查
+            if self.config.external_sarif:
+                from pathlib import Path as _P
+                ext = _P(self.config.external_sarif)
+                if not ext.exists():
+                    raise FileNotFoundError(f"外部 SARIF 文件不存在: {ext}")
+                state.sarif_path = str(ext)
+                state.completed_phases.extend([
+                    "clone_repo", "create_database", "generate_query", "analyze",
+                ])
+                logger.info(
+                    "[外部 SARIF] 跳过 Phase 0~3，直接进入 Agent-R 审查: %s", ext
+                )
+                self._phase_review(state)
+                self._phase_generate_poc(state)
+                self._phase_verify(state)
+            else:
+                if self.config.github_url:
+                    self._phase_clone_repo(state)
 
-            self._phase_create_database(state)
-            self._phase_generate_query(state)
-            self._phase_analyze(state)
-            self._phase_review(state)
-            self._phase_generate_poc(state)
-            self._phase_verify(state)
+                self._phase_create_database(state)
+                self._phase_generate_query(state)
+                self._phase_analyze(state)
+                self._phase_review(state)
+                self._phase_generate_poc(state)
+                self._phase_verify(state)
 
         except Exception as exc:  # noqa: BLE001
             state.error = str(exc)
             logger.error("Pipeline 执行失败: %s", exc)
         finally:
-            if self.config.github_url:
+            if self.config.github_url and not self.config.external_sarif:
                 self._cleanup_clone(state)
 
         dyn_confirmed = len(state.confirmed_poc_results)
@@ -956,3 +989,49 @@ class Coordinator:
             success_count, len(vuln_types), total_vuln,
         )
         return states
+
+    # ------------------------------------------------------------------
+    # 公开接口：Agent-P 自主模式
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def run_with_planner(
+        cls,
+        base_config: PipelineConfig,
+    ) -> dict:
+        """
+        Agent-P 驱动的自主扫描模式。
+
+        流程：侦察 → 规划 → 多轮执行 → 评估 → 自适应循环。
+        用户无需指定 vuln_type，由 Agent-P 自主决策。
+
+        Args:
+            base_config: 基础配置（language 可为空，Agent-P 自动推断）。
+
+        Returns:
+            包含 recon_report / scan_plan / all_states / 统计信息的字典。
+        """
+        from src.agents.agent_p import AgentP
+
+        source_dir = base_config.source_dir
+        if not source_dir:
+            raise ValueError("自主模式需要 source_dir（可通过 Phase 0 克隆后设置）")
+
+        repo_mgr = GithubRepoManager()
+        rule_mem = None
+        if base_config.enable_rule_memory:
+            try:
+                rule_mem = RuleMemory(memory_dir=base_config.rule_memory_dir)
+            except Exception:
+                pass
+
+        planner = AgentP(
+            repo_manager=repo_mgr,
+            rule_memory=rule_mem,
+        )
+
+        return planner.run_autonomous(
+            source_dir=source_dir,
+            coordinator_factory=cls,
+            base_config=base_config,
+        )

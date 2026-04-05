@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -29,8 +33,25 @@ from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
+
+def _flush_logs() -> None:
+    """强制刷新所有 logging handler 及 stdout/stderr。"""
+    for h in logging.root.handlers:
+        try:
+            h.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
 # 源码上下文窗口：发现行前后各取 N 行
-_CONTEXT_LINES: int = 15
+_CONTEXT_LINES: int = 30
 
 # ---------------------------------------------------------------------------
 # 数据结构
@@ -71,29 +92,60 @@ class ReviewResult:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT_R_JAVA = """\
-你是一位资深 Java 安全研究员，擅长审查各类漏洞（SQL注入、命令注入、路径穿越、SSRF、反序列化、表达式注入、XSS、XXE 等）。
-你将收到一段 CodeQL 静态扫描发现，以及对应的 Java 源码上下文。
-请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+你是一位资深 Java 安全研究员，同时擅长识别**真实漏洞**和**静态分析误报**。
+你的核心任务不是"尽可能多地发现漏洞"，而是**精准判断每条发现是 TP 还是 FP**。
 
-通用审查维度：
-1. **数据来源**：用户输入是否真正可控（HTTP参数/Header/Cookie/Body/上传文件）？
-2. **净化器**：在进入 Sink 之前是否经过了参数化、白名单过滤、正则校验或类型转换？
-3. **漏洞类型专属**：
-   - SQL注入：是否使用 PreparedStatement / 参数绑定？
-   - 命令注入：参数是否通过 Runtime.exec(String[]) 隔离？
-   - 路径穿越：是否调用了 getCanonicalPath() + 前缀校验？
-   - SSRF：目标 URL 是否经过白名单或协议过滤？
-   - 表达式注入：是否使用了安全上下文（SimpleEvaluationContext）？
-   - 反序列化：是否使用了过滤型 ObjectInputStream？
-4. **可达性**：该代码路径是否在生产环境中可触达（非测试代码/废弃接口）？
-5. **权限**：接口是否需要特定权限（影响风险等级，但不代表安全）？
+你将收到一段 CodeQL 静态扫描发现，以及对应的 Java 源码上下文。
+请仔细分析代码，判断这个发现是真实的安全问题（vulnerable），还是误报（safe）。
+
+## 审查原则
+
+**最重要的原则：追踪数据流。** 不要仅看 Sink 处的代码模式，必须回溯变量的实际值：
+- 变量在到达 Sink 之前，是否被重新赋值为硬编码常量？
+- 条件分支是否使得污染数据不可达 Sink？
+- 集合/数组操作是否选取了安全的元素？
+
+## 常见误报（FP）模式 — 遇到以下模式应判 safe：
+
+**F1. 硬编码常量覆盖：** 变量虽来自用户输入，但在到达 Sink 前被赋值为硬编码常量。
+  例：`bar = doSomething(param)` 而 `doSomething()` 内部直接 `return "safe!"`
+
+**F2. 不可达的污染分支：** if/switch 条件使污染数据的分支永远不会执行。
+  例：`int num=86; if ((7*42)-num > 200) bar="safe"; else bar=param;`
+  → (7×42)-86=208>200 恒为true，bar 永远是 "safe"，用户输入 param 永远不会到达 Sink。
+  **你必须实际计算数学表达式来验证条件。**
+
+**F3. 集合操作选取安全元素：** List/Array 中虽添加了用户输入，但实际使用的是安全元素。
+  例：`list.add("safe"); list.add(param); list.add("moresafe"); list.remove(0); bar=list.get(1);`
+  → remove(0) 后列表为 [param, "moresafe"]，get(1) 取的是 "moresafe"，非用户输入。
+  **你必须逐步模拟集合操作来确定最终取出的值。**
+
+**F4. 类型转换天然净化：** 用户输入经过 Integer.parseInt()、Long.parseLong()、Double.parseDouble() 等类型转换后，注入攻击不可能成功。
+
+**F5. 安全 API 替代：** 使用了安全 API 如 PreparedStatement (SQL)、exec(String[]) (命令)、Encoder.encode() (XSS) 等。
+
+**F6. 内部方法返回常量：** 调用链中某个方法无论接收什么参数，都返回固定的安全值（如 "safe!"、"alsosafe" 等硬编码字符串）。如果上下文中提供了该方法的定义，请检查其返回值。
+
+## 真实漏洞（TP）确认 — 以下模式应判 vulnerable：
+
+**T1. 直接拼接：** 用户输入直接拼接到命令/SQL/路径/URL字符串中，无任何净化。
+**T2. 无效净化：** 虽有过滤但不充分（如仅 URL decode、Base64 编解码、trim 不算净化）。
+**T3. 条件分支均污染：** 所有可达的分支都包含用户输入流向 Sink 的路径。
+
+## 审查步骤（必须逐步执行）：
+
+1. 识别 Source：找到用户输入的来源（request.getParameter/getHeader/getCookies 等）
+2. 追踪 Transform：变量经历了哪些赋值、方法调用、条件分支？
+3. 判断到达 Sink 的实际值：**不是变量名，而是变量的实际内容**是否可控？
+4. 检查 FP 模式 F1~F6：是否命中任何已知的误报模式？
+5. 综合判定：给出最终结论
 
 你的回复必须是合法的 JSON，格式如下：
 {
   "status": "vulnerable" | "safe" | "uncertain",
   "confidence": 0.0 ~ 1.0,
-  "engine_detected": "漏洞类型或框架名（如 Spring EL / JDBC / Runtime / Unknown）",
-  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
+  "engine_detected": "漏洞类型或框架名（如 Command Injection / SQL Injection / Spring EL / MD5 / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据，特别是数据流分析过程）",
   "sink_method": "被调用的危险方法全名"
 }
 """
@@ -207,50 +259,141 @@ _SYSTEM_PROMPT_R_CSHARP = """\
 """
 
 _SYSTEM_PROMPT_R_CPP = """\
-你是一位资深 C/C++ 安全研究员，擅长审查各类漏洞（命令注入、缓冲区溢出、格式化字符串、路径穿越、整数溢出、Use-After-Free 等）。
-你将收到一段 CodeQL 静态扫描发现，以及对应的 C/C++ 源码上下文。
-请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+你是一位资深 C/C++ 安全研究员，擅长审查各类安全问题，包括但不限于：
+- 注入类：命令注入、格式化字符串、路径穿越
+- 内存安全：缓冲区溢出、Use-After-Free、Double-Free、整数溢出、空指针解引用
+- 资源管理：内存泄露、文件句柄泄露
+- 并发安全：竞态条件、死锁
 
-通用审查维度：
-1. **数据来源**：用户输入是否真正可控（argv、getenv、fgets/scanf/read、网络 recv 等）？
-2. **净化器**：是否经过了输入长度校验、白名单过滤、整数范围检查、路径规范化？
-3. **漏洞类型专属**：
-   - 命令注入：是否使用了 system()/popen() 拼接字符串？可否用 execvp 数组参数替代？
-   - 缓冲区溢出：目标缓冲区大小是否足够？是否使用了 strncpy/snprintf 等安全版本？
-   - 格式化字符串：printf 系列是否直接使用了用户输入作为格式串？
-   - 路径穿越：fopen/open 的路径是否经过 realpath() + 前缀校验？
-   - 整数溢出：算术运算结果是否用于内存分配或数组索引？
-4. **可达性**：该代码路径是否在实际运行中可触达？
-5. **编译器防护**：是否开启了 ASLR/Stack Canary/FORTIFY_SOURCE 等缓解措施？
+你将收到一段 CodeQL 静态扫描发现，以及对应的 C/C++ 源码上下文。
+请判断这个发现是真实的安全问题，还是误报（false positive）。
+
+审查维度（根据漏洞类别灵活选择）：
+
+**A. 注入/格式化字符串：**
+1. 数据来源：用户输入是否真正可控（argv、getenv、fgets/scanf/read、网络 recv）？
+2. 净化器：是否经过长度校验、白名单过滤、路径规范化？
+3. 命令注入：system()/popen() 是否拼接了外部输入？格式化字符串：printf 是否直接使用了外部输入？
+
+**B. 内存安全：**
+1. 缓冲区溢出：目标缓冲区大小是否足够？是否使用了 strncpy/snprintf 等安全版本？
+2. UAF/Double-Free：内存释放后是否有后续使用？指针释放后是否置 NULL？
+3. 整数溢出：算术运算结果是否用于内存分配（malloc）或数组索引？是否有范围检查？
+4. 不安全 API：是否使用了 strcpy/strcat/sprintf/gets 等无边界检查函数？
+
+**C. 资源/并发：**
+1. 分配的内存/打开的文件是否在所有路径上正确释放/关闭？
+2. 共享数据是否有适当的锁保护？
+
+**D. 通用维度：**
+1. 可达性：该代码路径是否在实际运行中可触达？
+2. 编译器防护：ASLR/Stack Canary/FORTIFY_SOURCE 可以缓解但不消除漏洞。
 
 你的回复必须是合法的 JSON，格式如下：
 {
   "status": "vulnerable" | "safe" | "uncertain",
   "confidence": 0.0 ~ 1.0,
-  "engine_detected": "漏洞类型（如 system() / fopen / printf / memcpy / Unknown）",
+  "engine_detected": "漏洞类型（如 strcpy / malloc / printf / free / Unknown）",
   "reasoning": "简洁的中文推理说明（2-5句话，说明判断依据）",
   "sink_method": "被调用的危险函数全名"
 }
 """
 
-_SYSTEM_PROMPT_R_GENERIC = """\
-你是一位资深安全研究员，擅长审查各类 Web 应用安全漏洞。
-你将收到一段 CodeQL 静态扫描发现，以及对应的源码上下文。
-请判断这个发现是真实可利用的漏洞，还是误报（false positive）。
+_SYSTEM_PROMPT_R_KERNEL = """\
+你是一位资深 Linux 内核安全研究员，专精内核漏洞分析（CVE 级别）。
+你熟悉内核开发规范、内存管理子系统、锁机制、引用计数以及用户态-内核态数据传递。
 
-通用审查维度：
-1. **数据来源**：用户输入是否真正来自外部可控渠道（HTTP请求、配置输入等）？
-2. **净化器**：进入 Sink 之前是否经过有效的验证、过滤、参数化或编码处理？
-3. **数据流完整性**：Source → Sink 的路径在代码中是否真实存在且可触达？
-4. **可利用性**：触发该漏洞需要哪些前置条件？是否需要特定权限或配置？
-5. **误报信号**：常见误报包括：输入已经是常量/枚举值、已使用安全API包装、仅用于日志记录等。
+你将收到一段 CodeQL 静态扫描发现，以及对应的内核 C 源码上下文。
+请判断这个发现是真实的安全问题，还是误报（false positive）。
+
+## 内核特有审查维度
+
+**A. 用户态输入校验（__user 指针）：**
+1. `copy_from_user` / `get_user` / `__get_user` 的返回值是否检查？
+2. 用户传入的长度/偏移量是否做了上界校验？
+3. `access_ok()` 是否在拷贝前调用？
+
+**B. 内存安全：**
+1. `kmalloc` / `kzalloc` / `vmalloc` 返回值是否判空？
+2. `kfree` 后指针是否置 NULL？是否存在 double-free？
+3. Use-After-Free：对象释放后是否仍被引用？特别关注 RCU 保护对象和引用计数。
+4. 缓冲区溢出：`memcpy` / `copy_from_user` 的长度参数是否受控？是否依赖用户输入？
+5. 整数溢出：乘法/加法结果用于 `kmalloc` 大小时是否有溢出检查（`check_mul_overflow` / `array_size`）？
+
+**C. 竞态条件：**
+1. 共享数据结构是否在正确的锁保护下访问（spin_lock / mutex / rcu_read_lock）？
+2. TOCTOU：检查和使用之间是否可能被其他线程修改？
+3. `atomic_t` / `refcount_t` 操作是否正确？
+
+**D. 权限提升：**
+1. `capable()` / `ns_capable()` 检查是否充分？
+2. 特权操作是否仅限 root 或具备特定 capability 的进程？
+3. `ioctl` handler 是否对 cmd 做了范围校验？
+
+**E. 信息泄露：**
+1. `copy_to_user` 的源缓冲区是否已初始化（避免栈/堆未初始化内存泄露到用户态）？
+2. `struct` padding 是否清零（memset 或 kzalloc）？
+
+## 常见内核 FP 模式（遇到以下模式应判 safe）：
+1. **kmalloc 检查已有**：代码在 kmalloc 后立即 `if (!ptr)` 返回 -ENOMEM
+2. **copy_from_user 已校验**：返回值被 `if (copy_from_user(...))` 包围
+3. **锁已持有**：函数注释或调用者明确持有相关锁（`must hold xxx_lock`）
+4. **BUILD_BUG_ON / static_assert**：编译期保证的约束
+5. **kref / refcount 保护**：引用计数正确管理的对象生命周期
+6. **内部 helper 函数**：仅被内核内部调用、输入已在上层校验
+
+## 审查步骤：
+1. 识别 Source（用户可控数据来源：ioctl 参数、copy_from_user、sysfs/procfs write）
+2. 追踪数据流（赋值、类型转换、边界检查、锁状态）
+3. 判断到达 Sink 时数据是否仍然用户可控且危险
+4. 检查内核防护机制（KASLR/SMAP/SMEP 缓解但不消除）
+5. 给出结论
 
 你的回复必须是合法的 JSON，格式如下：
 {
   "status": "vulnerable" | "safe" | "uncertain",
   "confidence": 0.0 ~ 1.0,
-  "engine_detected": "漏洞类型（如 SQL Injection / Command Injection / Unknown）",
-  "reasoning": "简洁的中文推理说明（2-5句话）",
+  "engine_detected": "漏洞类型（如 UAF / OOB / Race Condition / Null Deref / Info Leak / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，特别强调内核安全模型分析）",
+  "sink_method": "被调用的危险函数或宏（如 kmalloc / memcpy / copy_from_user / kfree）"
+}
+"""
+
+_SYSTEM_PROMPT_R_GENERIC = """\
+你是一位资深安全研究员，同时擅长识别**真实漏洞**和**静态分析误报**。
+你的核心任务是**精准判断每条发现是 TP 还是 FP**，而不是尽可能多地报告漏洞。
+
+你将收到一段 CodeQL 静态扫描发现，以及对应的源码上下文。
+请仔细分析代码的数据流，判断这个发现是真实的安全问题（vulnerable），还是误报（safe）。
+
+## 审查原则
+
+**最重要的原则：追踪数据流。** 不要仅看 Sink 处的代码模式，必须回溯变量的实际值：
+- 变量在到达 Sink 之前，是否被重新赋值为硬编码常量？
+- 条件分支是否使得污染数据不可达 Sink？
+- 集合/数组操作是否选取了安全的元素？
+
+## 常见误报（FP）模式 — 遇到以下模式应判 safe：
+1. **硬编码覆盖**：变量虽源自用户输入，但后续被赋值为常量
+2. **不可达分支**：条件恒真/恒假使得污染路径不可达（需计算验证）
+3. **安全元素选取**：集合操作最终取出的是非用户控制的元素
+4. **类型转换净化**：parseInt/parseLong 等使注入不可能
+5. **安全 API**：参数化查询、编码输出等
+6. **非安全场景**：弱哈希用于缓存键而非密码、随机数用于非安全用途
+
+## 审查步骤：
+1. 识别 Source（用户输入来源）
+2. 追踪 Transform（赋值、调用、分支）
+3. 判断到达 Sink 的实际值是否用户可控
+4. 检查是否命中 FP 模式
+5. 给出结论
+
+你的回复必须是合法的 JSON，格式如下：
+{
+  "status": "vulnerable" | "safe" | "uncertain",
+  "confidence": 0.0 ~ 1.0,
+  "engine_detected": "漏洞/问题类型（如 SQL Injection / MD5 / Buffer Overflow / Unknown）",
+  "reasoning": "简洁的中文推理说明（2-5句话，特别是数据流分析过程）",
   "sink_method": "被调用的危险方法全名"
 }
 """
@@ -262,14 +405,23 @@ _SYSTEM_PROMPTS_R: dict[str, str] = {
     "go":         _SYSTEM_PROMPT_R_GO,
     "csharp":     _SYSTEM_PROMPT_R_CSHARP,
     "cpp":        _SYSTEM_PROMPT_R_CPP,
+    "kernel":     _SYSTEM_PROMPT_R_KERNEL,
+    "generic":    _SYSTEM_PROMPT_R_GENERIC,
 }
 
 # 兼容旧引用
 _SYSTEM_PROMPT_R = _SYSTEM_PROMPT_R_JAVA
 
 
-def _get_review_system_prompt(language: str) -> str:
-    """按语言返回对应的审查系统提示。"""
+def _get_review_system_prompt(language: str, prompt_preset: str = "") -> str:
+    """按语言或 prompt_preset 返回对应的审查系统提示。
+
+    prompt_preset 优先于 language（由 Agent-T 的 CodebaseProfile 指定）。
+    """
+    if prompt_preset:
+        hit = _SYSTEM_PROMPTS_R.get(prompt_preset.lower())
+        if hit:
+            return hit
     return _SYSTEM_PROMPTS_R.get(language.lower(), _SYSTEM_PROMPT_R_GENERIC)
 
 
@@ -294,6 +446,44 @@ _REVIEW_TEMPLATE = """\
 ```
 
 请按要求输出 JSON 格式的研判结论。
+"""
+
+# ---------------------------------------------------------------------------
+# 批量审查 Prompt
+# ---------------------------------------------------------------------------
+
+_BATCH_REVIEW_TEMPLATE = """\
+你需要一次性审查以下 {count} 条 CodeQL 发现，对每条分别给出独立的研判结论。
+
+{findings_block}
+
+请返回一个 JSON **数组**，包含 {count} 个对象，每个对象的格式与单条审查相同：
+```json
+[
+  {{
+    "id": 1,
+    "status": "vulnerable" | "safe" | "uncertain",
+    "confidence": 0.0 ~ 1.0,
+    "engine_detected": "漏洞类型",
+    "reasoning": "简洁的中文推理说明（2-5句话）",
+    "sink_method": "危险方法全名"
+  }},
+  ...
+]
+```
+注意：数组中对象的 id 必须与上面发现编号一一对应，不要遗漏任何一条。
+"""
+
+_BATCH_FINDING_TEMPLATE = """\
+--- 发现 #{idx} ---
+- 规则 ID : {rule_id}
+- 文件    : {file_uri}
+- 行号    : {start_line}
+- 消息    : {message}
+
+```{code_lang}
+{code_context}
+```
 """
 
 
@@ -411,6 +601,35 @@ def _parse_llm_json(raw: str) -> dict[str, Any]:
         raise ValueError(f"LLM 返回的 JSON 无效: {exc}\n原始内容:\n{raw}") from exc
 
 
+def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]:
+    """
+    从 LLM 原始输出中提取 JSON 数组（批量审查模式）。
+
+    Returns:
+        字典列表，长度应与 expected_count 一致。
+
+    Raises:
+        ValueError: JSON 解析失败时抛出。
+    """
+    import re
+    text = raw.strip()
+    if "```" in text:
+        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+        if m:
+            text = m.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"批量 JSON 解析失败: {exc}\n原始内容:\n{raw[:500]}") from exc
+
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    raise ValueError(f"期望 JSON 数组，实际类型: {type(parsed).__name__}")
+
+
 # ---------------------------------------------------------------------------
 # Agent-R 主类
 # ---------------------------------------------------------------------------
@@ -440,11 +659,14 @@ class AgentR:
         context_lines: int = _CONTEXT_LINES,
         enable_code_browser: bool = True,
     ) -> None:
-        import os
+        _http_timeout = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
         self.llm: ChatOpenAI = llm or ChatOpenAI(
             model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.1,
+            temperature=0.0,
             base_url=os.environ.get("OPENAI_BASE_URL") or None,
+            timeout=_http_timeout,
+            max_tokens=2048,
+            max_retries=2,
         )
         self.context_lines = context_lines
         self.enable_code_browser = enable_code_browser
@@ -454,6 +676,7 @@ class AgentR:
         self,
         finding: SarifFinding,
         language: str = "java",
+        prompt_preset: str = "",
     ) -> dict[str, Any]:
         """
         调用 LLM 对单条发现进行语义审查。
@@ -461,6 +684,7 @@ class AgentR:
         Args:
             finding: 待审查的 SARIF 发现。
             language: 目标语言，用于选择对应的系统提示和代码块语法高亮。
+            prompt_preset: Agent-T 指定的 prompt 预设（优先于 language）。
         """
         code_lang = _get_code_block_lang(language)
         human_msg = _REVIEW_TEMPLATE.format(
@@ -471,97 +695,218 @@ class AgentR:
             code_context=finding.code_context or "（源码上下文不可用）",
             code_lang=code_lang,
         )
-        sys_prompt = _get_review_system_prompt(language)
+        sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
         chain = self.llm | self._parser
-        raw = chain.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content=human_msg),
-        ])
-        return _parse_llm_json(raw)
+        import threading as _th
+        _timeout_sec = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
+        _result: list = [None]
+        _error: list = [None]
 
-    def review(
-        self,
-        sarif_path: str,
-        repo_root: str,
-        language: str = "java",
-    ) -> list[ReviewResult]:
-        """
-        审查 CodeQL SARIF 扫描结果，返回带研判结论的列表。
-
-        Args:
-            sarif_path: SARIF 文件路径。
-            repo_root: 仓库本地根目录（用于读取源码上下文）。
-
-        Returns:
-            ReviewResult 列表，每条对应一个 CodeQL 发现。
-        """
-        findings = _parse_sarif(sarif_path)
-        if not findings:
-            logger.info("SARIF 中无发现，Agent-R 跳过审查。")
-            return []
-
-        results: list[ReviewResult] = []
-
-        # 初始化 CodeBrowser（如果启用）
-        code_browser = None
-        if self.enable_code_browser:
+        def _call() -> None:
             try:
-                from src.utils.code_browser import CodeBrowser
-                code_browser = CodeBrowser(repo_root=repo_root, language=language)
-                logger.info("[Agent-R] CodeBrowser 已启用，使用智能上下文导航")
-            except Exception as exc:
-                logger.debug("[Agent-R] CodeBrowser 初始化失败，降级为固定窗口: %s", exc)
+                _result[0] = chain.invoke([
+                    SystemMessage(content=sys_prompt),
+                    HumanMessage(content=human_msg),
+                ])
+            except Exception as e:  # noqa: BLE001
+                _error[0] = e
 
-        for idx, finding in enumerate(findings, 1):
-            logger.info(
-                "[Agent-R] 审查发现 %d/%d: %s:%d",
-                idx, len(findings),
-                finding.file_uri, finding.start_line,
+        _t = _th.Thread(target=_call, daemon=True)
+        _t.start()
+        _t0 = time.time()
+        _heartbeat_interval = 30
+        _waited = 0
+        while _t.is_alive() and _waited < _timeout_sec:
+            _t.join(timeout=_heartbeat_interval)
+            _waited = time.time() - _t0
+            if _t.is_alive():
+                logger.info(
+                    "[Agent-R] [WAIT] 等待 LLM 响应... %.0fs / %ds",
+                    _waited, _timeout_sec,
+                )
+                _flush_logs()
+        if _t.is_alive():
+            logger.warning(
+                "[Agent-R] [TIMEOUT] LLM 调用超时 (>%ds), 标记 UNCERTAIN", _timeout_sec,
             )
+            _flush_logs()
+            raise TimeoutError(
+                f"[Agent-R] LLM 调用超时（>{_timeout_sec}s），标记 UNCERTAIN"
+            )
+        elapsed = time.time() - _t0
+        logger.info("[Agent-R] [OK] LLM 响应完成 (%.1fs)", elapsed)
+        _flush_logs()
+        if _error[0]:
+            raise _error[0]
+        return _parse_llm_json(_result[0])
 
-            # 读取源码上下文（优先 CodeBrowser 智能导航，降级为固定窗口）
+    def _invoke_llm_batch(
+        self,
+        findings_with_context: list[SarifFinding],
+        language: str = "java",
+        prompt_preset: str = "",
+    ) -> list[dict[str, Any]]:
+        """对一批 findings 执行单次 LLM 调用，返回审查结果数组。"""
+        code_lang = _get_code_block_lang(language)
+        blocks = []
+        for i, f in enumerate(findings_with_context, 1):
+            blocks.append(_BATCH_FINDING_TEMPLATE.format(
+                idx=i,
+                rule_id=f.rule_id,
+                file_uri=f.file_uri,
+                start_line=f.start_line,
+                message=f.message,
+                code_context=f.code_context or "(源码上下文不可用)",
+                code_lang=code_lang,
+            ))
+
+        human_msg = _BATCH_REVIEW_TEMPLATE.format(
+            count=len(findings_with_context),
+            findings_block="\n".join(blocks),
+        )
+        sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
+        chain = self.llm | self._parser
+        import threading as _th
+        _timeout_sec = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
+        _result: list = [None]
+        _error: list = [None]
+
+        def _call() -> None:
+            try:
+                _result[0] = chain.invoke([
+                    SystemMessage(content=sys_prompt),
+                    HumanMessage(content=human_msg),
+                ])
+            except Exception as e:  # noqa: BLE001
+                _error[0] = e
+
+        _t = _th.Thread(target=_call, daemon=True)
+        _t.start()
+        _t0 = time.time()
+        _heartbeat_interval = 30
+        _waited = 0
+        while _t.is_alive() and _waited < _timeout_sec:
+            _t.join(timeout=_heartbeat_interval)
+            _waited = time.time() - _t0
+            if _t.is_alive():
+                logger.info(
+                    "[Agent-R] [WAIT] 等待 LLM 响应... %.0fs / %ds",
+                    _waited, _timeout_sec,
+                )
+                _flush_logs()
+        if _t.is_alive():
+            logger.warning(
+                "[Agent-R] [TIMEOUT] LLM 调用超时 (>%ds), 跳过本批次", _timeout_sec,
+            )
+            _flush_logs()
+            raise TimeoutError(
+                f"[Agent-R] LLM 调用超时 (>{_timeout_sec}s), 跳过本批次"
+            )
+        elapsed = time.time() - _t0
+        logger.info("[Agent-R] [OK] LLM 批量响应完成 (%.1fs)", elapsed)
+        _flush_logs()
+        if _error[0]:
+            raise _error[0]
+        return _parse_llm_json_array(_result[0], expected_count=len(findings_with_context))
+
+    def _review_batch(
+        self,
+        batch_findings: list[SarifFinding],
+        batch_start_idx: int,
+        total: int,
+        repo_root: str,
+        language: str,
+        code_browser: Any,
+        prompt_preset: str = "",
+    ) -> list[ReviewResult]:
+        """审查一批 findings（单次 LLM 调用），返回 ReviewResult 列表。"""
+        batch_size = len(batch_findings)
+        logger.info(
+            "[Agent-R] 批量审查 %d~%d/%d（%d条/批）",
+            batch_start_idx + 1,
+            batch_start_idx + batch_size,
+            total,
+            batch_size,
+        )
+        _flush_logs()
+
+        # 填充源码上下文
+        for f in batch_findings:
             if code_browser:
                 try:
-                    finding.code_context = code_browser.build_rich_context(
-                        file_uri=finding.file_uri,
-                        center_line=finding.start_line,
-                        sink_method=finding.message[:80] if finding.message else "",
+                    f.code_context = code_browser.build_rich_context(
+                        file_uri=f.file_uri,
+                        center_line=f.start_line,
+                        sink_method=f.message[:80] if f.message else "",
                         base_window=self.context_lines,
                     )
-                    logger.debug(
-                        "[Agent-R] CodeBrowser 上下文: %d 字符（含调用链追踪）",
-                        len(finding.code_context),
-                    )
                 except Exception:
-                    finding.code_context = _load_code_context(
+                    f.code_context = _load_code_context(
                         repo_root=repo_root,
-                        file_uri=finding.file_uri,
-                        center_line=finding.start_line,
+                        file_uri=f.file_uri,
+                        center_line=f.start_line,
                         window=self.context_lines,
                     )
             else:
-                finding.code_context = _load_code_context(
+                f.code_context = _load_code_context(
                     repo_root=repo_root,
-                    file_uri=finding.file_uri,
-                    center_line=finding.start_line,
+                    file_uri=f.file_uri,
+                    center_line=f.start_line,
                     window=self.context_lines,
                 )
 
-            # LLM 语义审查（传入语言，使用对应的提示词）
+        # 批量 LLM 调用（含应用层重试）
+        _max_retries = 3
+        verdicts = None
+        _last_exc = None
+        for _attempt in range(1, _max_retries + 1):
             try:
-                verdict = self._invoke_llm(finding, language=language)
-            except (ValueError, Exception) as exc:  # noqa: BLE001
+                verdicts = self._invoke_llm_batch(batch_findings, language=language, prompt_preset=prompt_preset)
+                break
+            except (ValueError, TimeoutError, Exception) as exc:  # noqa: BLE001
+                _last_exc = exc
+                exc_str = str(exc)
+                is_retryable = any(kw in exc_str for kw in (
+                    "503", "502", "429", "DOCTYPE", "html", "超时",
+                    "Timeout", "JSON", "解析失败",
+                ))
+                if is_retryable and _attempt < _max_retries:
+                    _wait = _attempt * 5
+                    logger.warning(
+                        "[Agent-R] 第 %d/%d 次尝试失败 (%s), %ds 后重试...",
+                        _attempt, _max_retries, type(exc).__name__, _wait,
+                    )
+                    _flush_logs()
+                    time.sleep(_wait)
+                    continue
                 logger.warning(
-                    "[Agent-R] 发现 %d 审查失败（LLM 异常），标记为 UNCERTAIN: %s", idx, exc
+                    "[Agent-R] 批量审查失败（%d次尝试后放弃），标记 UNCERTAIN: %s",
+                    _attempt, exc,
                 )
-                verdict = {
+                break
+        if verdicts is None:
+            verdicts = [
+                {
                     "status": "uncertain",
                     "confidence": 0.0,
                     "engine_detected": "Unknown",
-                    "reasoning": f"LLM 审查异常: {exc}",
+                    "reasoning": f"LLM 异常({_max_retries}次重试): {_last_exc}",
                     "sink_method": "",
                 }
+            ] * batch_size
 
+        # 确保 verdicts 数量匹配
+        while len(verdicts) < batch_size:
+            verdicts.append({
+                "status": "uncertain",
+                "confidence": 0.0,
+                "engine_detected": "Unknown",
+                "reasoning": "LLM 未返回足够结果",
+                "sink_method": "",
+            })
+
+        results = []
+        for i, (finding, verdict) in enumerate(zip(batch_findings, verdicts)):
             status = VulnStatus(verdict.get("status", "uncertain"))
             result = ReviewResult(
                 finding=finding,
@@ -571,18 +916,308 @@ class AgentR:
                 reasoning=verdict.get("reasoning", ""),
                 sink_method=verdict.get("sink_method", ""),
             )
-            results.append(result)
-
             logger.info(
-                "[Agent-R] 结论: %s (置信度: %.0f%%) | %s",
+                "[Agent-R] #%d %s (%.0f%%) | %s",
+                batch_start_idx + i + 1,
                 status.value.upper(),
                 result.confidence * 100,
-                result.reasoning[:80],
+                result.reasoning[:60],
+            )
+            results.append(result)
+
+        return results
+
+    def _review_one(
+        self,
+        finding: Any,
+        idx: int,
+        total: int,
+        repo_root: str,
+        language: str,
+        code_browser: Any,
+        prompt_preset: str = "",
+    ) -> ReviewResult:
+        """审查单条 finding（可在线程池中并发执行）。"""
+        logger.info(
+            "[Agent-R] 审查发现 %d/%d: %s:%d",
+            idx, total, finding.file_uri, finding.start_line,
+        )
+
+        # 读取源码上下文（优先 CodeBrowser 智能导航，降级为固定窗口）
+        if code_browser:
+            try:
+                finding.code_context = code_browser.build_rich_context(
+                    file_uri=finding.file_uri,
+                    center_line=finding.start_line,
+                    sink_method=finding.message[:80] if finding.message else "",
+                    base_window=self.context_lines,
+                )
+                logger.debug(
+                    "[Agent-R] CodeBrowser 上下文: %d 字符（含调用链追踪）",
+                    len(finding.code_context),
+                )
+            except Exception:
+                finding.code_context = _load_code_context(
+                    repo_root=repo_root,
+                    file_uri=finding.file_uri,
+                    center_line=finding.start_line,
+                    window=self.context_lines,
+                )
+        else:
+            finding.code_context = _load_code_context(
+                repo_root=repo_root,
+                file_uri=finding.file_uri,
+                center_line=finding.start_line,
+                window=self.context_lines,
             )
 
-        vulnerable = sum(1 for r in results if r.status == VulnStatus.VULNERABLE)
+        # LLM 语义审查
+        try:
+            verdict = self._invoke_llm(finding, language=language, prompt_preset=prompt_preset)
+        except (ValueError, Exception) as exc:  # noqa: BLE001
+            logger.warning(
+                "[Agent-R] 发现 %d 审查失败（LLM 异常），标记为 UNCERTAIN: %s", idx, exc
+            )
+            verdict = {
+                "status": "uncertain",
+                "confidence": 0.0,
+                "engine_detected": "Unknown",
+                "reasoning": f"LLM 审查异常: {exc}",
+                "sink_method": "",
+            }
+
+        status = VulnStatus(verdict.get("status", "uncertain"))
+        result = ReviewResult(
+            finding=finding,
+            status=status,
+            confidence=float(verdict.get("confidence", 0.0)),
+            engine_detected=verdict.get("engine_detected", "Unknown"),
+            reasoning=verdict.get("reasoning", ""),
+            sink_method=verdict.get("sink_method", ""),
+        )
+
+        logger.info(
+            "[Agent-R] 结论: %s (置信度: %.0f%%) | %s",
+            status.value.upper(),
+            result.confidence * 100,
+            result.reasoning[:80],
+        )
+        return result
+
+    def review(
+        self,
+        sarif_path: str,
+        repo_root: str,
+        language: str = "java",
+        parallel_workers: int = 1,
+        batch_size: int = 1,
+        checkpoint_done: dict | None = None,
+        checkpoint_callback: Any = None,
+        prompt_preset: str = "",
+    ) -> list[ReviewResult]:
+        """
+        审查 CodeQL SARIF 扫描结果，返回带研判结论的列表。
+
+        Args:
+            sarif_path: SARIF 文件路径。
+            repo_root: 仓库本地根目录（用于读取源码上下文）。
+            language: 编程语言。
+            parallel_workers: 批次级并发线程数（默认 1 串行）。
+            batch_size: 每次 LLM 调用包含的 finding 数。
+            checkpoint_done: 已完成的 finding key→verdict 映射（断点续跑）。
+            checkpoint_callback: 每批完成后的回调 fn(batch_results)。
+            prompt_preset: Agent-T 指定的 prompt 预设（如 "kernel"），优先于 language。
+
+        Returns:
+            ReviewResult 列表，顺序与 SARIF findings 一致。
+        """
+        findings = _parse_sarif(sarif_path)
+        if not findings:
+            logger.info("SARIF 中无发现，Agent-R 跳过审查。")
+            return []
+
+        total = len(findings)
+        done = checkpoint_done or {}
+
+        # 初始化 CodeBrowser（共享只读实例）
+        code_browser = None
+        if self.enable_code_browser:
+            try:
+                from src.utils.code_browser import CodeBrowser
+                code_browser = CodeBrowser(repo_root=repo_root, language=language)
+                logger.info("[Agent-R] CodeBrowser 已启用，使用智能上下文导航")
+            except Exception as exc:
+                logger.debug("[Agent-R] CodeBrowser 初始化失败，降级为固定窗口: %s", exc)
+
+        # ---- 批量模式（batch_size > 1） ----
+        if batch_size > 1:
+            batches = [
+                findings[i:i + batch_size]
+                for i in range(0, total, batch_size)
+            ]
+            n_batches = len(batches)
+            logger.info(
+                "[Agent-R] 批量模式: %d 条 findings / %d 批 / 每批 %d 条 / %d 并发",
+                total, n_batches, batch_size, parallel_workers,
+            )
+
+            all_results: list[ReviewResult] = []
+
+            if parallel_workers <= 1:
+                for bi, batch in enumerate(batches):
+                    # 断点续跑：跳过已完成的整批
+                    batch_keys = [f"{f.file_uri}:{f.start_line}" for f in batch]
+                    if all(k in done for k in batch_keys):
+                        restored = []
+                        for f, k in zip(batch, batch_keys):
+                            v = done[k]
+                            restored.append(ReviewResult(
+                                finding=f,
+                                status=VulnStatus(v["status"]),
+                                confidence=float(v.get("confidence", 0)),
+                                engine_detected=v.get("engine_detected", ""),
+                                reasoning=v.get("reasoning", "(restored)"),
+                                sink_method=v.get("sink_method", ""),
+                            ))
+                        all_results.extend(restored)
+                        continue
+
+                    batch_results = self._review_batch(
+                        batch, bi * batch_size, total,
+                        repo_root, language, code_browser,
+                        prompt_preset=prompt_preset,
+                    )
+                    all_results.extend(batch_results)
+                    if checkpoint_callback:
+                        try:
+                            checkpoint_callback(batch_results)
+                        except Exception:  # noqa: BLE001
+                            pass
+            else:
+                logger.info("[Agent-R] 启用批次级并行（workers=%d）", parallel_workers)
+                ordered_results: list[list[ReviewResult]] = [[] for _ in batches]
+
+                # 断点续跑：先恢复已完成的批次
+                pending_indices: list[int] = []
+                for bi, batch in enumerate(batches):
+                    batch_keys = [f"{f.file_uri}:{f.start_line}" for f in batch]
+                    if all(k in done for k in batch_keys):
+                        restored = []
+                        for f, k in zip(batch, batch_keys):
+                            v = done[k]
+                            restored.append(ReviewResult(
+                                finding=f,
+                                status=VulnStatus(v["status"]),
+                                confidence=float(v.get("confidence", 0)),
+                                engine_detected=v.get("engine_detected", ""),
+                                reasoning=v.get("reasoning", "(restored)"),
+                                sink_method=v.get("sink_method", ""),
+                            ))
+                        ordered_results[bi] = restored
+                    else:
+                        pending_indices.append(bi)
+
+                if len(pending_indices) < len(batches):
+                    logger.info(
+                        "[Agent-R] 断点恢复: %d 批已跳过, %d 批待处理",
+                        len(batches) - len(pending_indices), len(pending_indices),
+                    )
+
+                import threading as _cb_lock_mod
+                _cb_lock = _cb_lock_mod.Lock()
+
+                def _safe_callback(br: list) -> None:
+                    if checkpoint_callback:
+                        with _cb_lock:
+                            try:
+                                checkpoint_callback(br)
+                            except Exception:  # noqa: BLE001
+                                pass
+
+                def _run_batch(bi: int) -> list[ReviewResult]:
+                    br = self._review_batch(
+                        batches[bi], bi * batch_size, total,
+                        repo_root, language, code_browser,
+                        prompt_preset=prompt_preset,
+                    )
+                    _safe_callback(br)
+                    return br
+
+                with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                    future_to_bi = {
+                        executor.submit(_run_batch, bi): bi
+                        for bi in pending_indices
+                    }
+                    for future in as_completed(future_to_bi):
+                        bi = future_to_bi[future]
+                        try:
+                            ordered_results[bi] = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("[Agent-R] 批次 %d 异常: %s", bi + 1, exc)
+                            ordered_results[bi] = [
+                                ReviewResult(
+                                    finding=f,
+                                    status=VulnStatus.UNCERTAIN,
+                                    confidence=0.0,
+                                    engine_detected="Unknown",
+                                    reasoning=f"批次异常: {exc}",
+                                    sink_method="",
+                                )
+                                for f in batches[bi]
+                            ]
+                for batch_results in ordered_results:
+                    all_results.extend(batch_results)
+
+            vulnerable = sum(1 for r in all_results if r.status == VulnStatus.VULNERABLE)
+            logger.info(
+                "[Agent-R] 审查完成 | 共 %d 条 | 真实漏洞: %d | 安全/不确定: %d",
+                total, vulnerable, total - vulnerable,
+            )
+            return all_results
+
+        # ---- 逐条模式（batch_size == 1，保持原有行为） ----
+        logger.info(
+            "SARIF 中共发现 %d 条待审查结果（逐条模式，并发线程: %d）",
+            total, parallel_workers,
+        )
+
+        results: list[ReviewResult] = [None] * total  # type: ignore[list-item]
+
+        if parallel_workers <= 1:
+            for idx, finding in enumerate(findings, 1):
+                results[idx - 1] = self._review_one(
+                    finding, idx, total, repo_root, language, code_browser,
+                    prompt_preset=prompt_preset,
+                )
+        else:
+            logger.info("[Agent-R] 启用 finding 级并行（workers=%d）", parallel_workers)
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        self._review_one,
+                        finding, idx, total, repo_root, language, code_browser,
+                        prompt_preset,
+                    ): idx - 1
+                    for idx, finding in enumerate(findings, 1)
+                }
+                for future in as_completed(future_to_idx):
+                    pos = future_to_idx[future]
+                    try:
+                        results[pos] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[Agent-R] finding %d 线程异常: %s", pos + 1, exc)
+                        results[pos] = ReviewResult(
+                            finding=findings[pos],
+                            status=VulnStatus.UNCERTAIN,
+                            confidence=0.0,
+                            engine_detected="Unknown",
+                            reasoning=f"线程异常: {exc}",
+                            sink_method="",
+                        )
+
+        vulnerable = sum(1 for r in results if r and r.status == VulnStatus.VULNERABLE)
         logger.info(
             "[Agent-R] 审查完成 | 共 %d 条 | 真实漏洞: %d | 安全/不确定: %d",
-            len(results), vulnerable, len(results) - vulnerable,
+            total, vulnerable, total - vulnerable,
         )
-        return results
+        return [r for r in results if r is not None]

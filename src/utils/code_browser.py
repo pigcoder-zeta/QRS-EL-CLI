@@ -128,68 +128,102 @@ class CodeBrowser:
         self.max_depth = max_depth
         self._file_cache: dict[str, list[str]] = {}
         self._symbol_index: dict[str, list[SymbolLocation]] | None = None
+        self._index_built = False
 
     def _read_file(self, file_path: str) -> list[str]:
-        """读取文件并缓存行列表。"""
-        if file_path not in self._file_cache:
-            fp = Path(file_path)
-            if not fp.is_absolute():
-                fp = self.repo_root / fp
-            if not fp.exists():
-                return []
-            try:
-                self._file_cache[file_path] = fp.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-            except OSError:
-                return []
-        return self._file_cache[file_path]
+        """读取文件并缓存行列表（索引构建阶段已预热大部分文件缓存）。"""
+        if file_path in self._file_cache:
+            return self._file_cache[file_path]
+        fp = Path(file_path)
+        if not fp.is_absolute():
+            fp = self.repo_root / fp
+        if not fp.exists():
+            return []
+        try:
+            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            self._file_cache[file_path] = lines
+            return lines
+        except OSError:
+            return []
+
+    _MAX_SOURCE_FILES = 500
 
     def _iter_source_files(self):
-        """遍历仓库中的所有源码文件。"""
+        """遍历仓库中的所有源码文件（超过上限则截断，避免大仓库全量扫描卡死）。"""
+        count = 0
         for fp in self.repo_root.rglob("*"):
             if fp.suffix.lower() in _SOURCE_EXTENSIONS and fp.is_file():
                 rel = str(fp.relative_to(self.repo_root)).replace("\\", "/")
-                # 排除常见无关目录
                 if any(seg in rel for seg in ("node_modules/", ".git/", "vendor/", "target/", "build/", "__pycache__/")):
                     continue
                 yield fp, rel
+                count += 1
+                if count >= self._MAX_SOURCE_FILES:
+                    logger.warning(
+                        "[CodeBrowser] 源文件数超过 %d，截断遍历以避免性能问题",
+                        self._MAX_SOURCE_FILES,
+                    )
+                    return
 
     # ------------------------------------------------------------------
-    # 1. 符号定义查询
+    # 1. 符号索引构建与定义查询
     # ------------------------------------------------------------------
+
+    def _build_symbol_index(self) -> None:
+        """一次性扫描所有源文件，构建 symbol_name → [SymbolLocation] 全局索引。"""
+        if self._index_built:
+            return
+        self._symbol_index = {}
+        file_count = 0
+        symbol_count = 0
+
+        all_patterns: list[tuple[str, str]] = []
+        if self.language and self.language in _DEFINITION_PATTERNS:
+            all_patterns = _DEFINITION_PATTERNS[self.language]
+        else:
+            for lp in _DEFINITION_PATTERNS.values():
+                all_patterns.extend(lp)
+
+        for fp, rel in self._iter_source_files():
+            file_count += 1
+            lang = _detect_lang(rel) or self.language
+            lang_patterns = _DEFINITION_PATTERNS.get(lang, all_patterns)
+            try:
+                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            self._file_cache[rel] = lines
+            for i, line in enumerate(lines):
+                for pattern, kind in lang_patterns:
+                    for m in re.finditer(pattern, line):
+                        name = m.group(1)
+                        loc = SymbolLocation(
+                            file_path=rel, line=i + 1, column=m.start(1),
+                            symbol_name=name, kind=kind,
+                            context_line=line.strip(),
+                        )
+                        self._symbol_index.setdefault(name, []).append(loc)
+                        symbol_count += 1
+
+        self._index_built = True
+        logger.info(
+            "[CodeBrowser] 符号索引构建完成: %d 文件, %d 符号",
+            file_count, symbol_count,
+        )
 
     def find_definition(self, symbol_name: str) -> list[SymbolLocation]:
         """
-        全局搜索符号的定义位置。
+        全局搜索符号的定义位置（通过缓存索引 O(1) 查表）。
 
         Args:
             symbol_name: 要查找的函数/类/方法名。
 
         Returns:
-            SymbolLocation 列表，按文件路径排序。
+            SymbolLocation 列表。
         """
-        results: list[SymbolLocation] = []
-        patterns = _DEFINITION_PATTERNS.get(self.language, [])
-        if not patterns:
-            for lang_patterns in _DEFINITION_PATTERNS.values():
-                patterns.extend(lang_patterns)
-
-        for fp, rel in self._iter_source_files():
-            try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for i, line in enumerate(lines):
-                for pattern, kind in patterns:
-                    for m in re.finditer(pattern, line):
-                        if m.group(1) == symbol_name:
-                            results.append(SymbolLocation(
-                                file_path=rel, line=i + 1, column=m.start(1),
-                                symbol_name=symbol_name, kind=kind,
-                                context_line=line.strip(),
-                            ))
-
+        self._build_symbol_index()
+        assert self._symbol_index is not None
+        results = self._symbol_index.get(symbol_name, [])
         logger.debug("[CodeBrowser] find_definition('%s') → %d 结果", symbol_name, len(results))
         return results
 
@@ -200,6 +234,7 @@ class CodeBrowser:
     def find_references(self, symbol_name: str, max_results: int = 30) -> list[SymbolLocation]:
         """
         查找符号在项目中的所有引用点（调用点/使用点）。
+        先触发索引构建以预热文件缓存，然后从缓存中搜索。
 
         Args:
             symbol_name: 要查找的符号名。
@@ -208,14 +243,11 @@ class CodeBrowser:
         Returns:
             SymbolLocation 列表。
         """
+        self._build_symbol_index()
         results: list[SymbolLocation] = []
         pattern = re.compile(r'\b' + re.escape(symbol_name) + r'\b')
 
-        for fp, rel in self._iter_source_files():
-            try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
+        for rel, lines in self._file_cache.items():
             for i, line in enumerate(lines):
                 if pattern.search(line):
                     results.append(SymbolLocation(
@@ -450,7 +482,7 @@ class CodeBrowser:
 
         result = "\n".join(parts)
         # 限制总长度（避免超出 LLM 上下文窗口）
-        if len(result) > 8000:
-            result = result[:8000] + "\n... (上下文已截断)"
+        if len(result) > 12000:
+            result = result[:12000] + "\n... (上下文已截断)"
 
         return result

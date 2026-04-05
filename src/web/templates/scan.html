@@ -21,7 +21,10 @@
     <button class="preset-card" onclick="applyPreset('java-all')"><span class="text-sm text-brand-500">Java 全量扫描</span><br/><span class="text-xs text-gray-600">14 种漏洞 × 并行</span></button>
     <button class="preset-card" onclick="applyPreset('java-injection')"><span class="text-sm text-yellow-400">Java 注入类</span><br/><span class="text-xs text-gray-600">SQL + CMD + EL + OGNL</span></button>
     <button class="preset-card" onclick="applyPreset('python-ssti')"><span class="text-sm text-green-400">Python SSTI</span><br/><span class="text-xs text-gray-600">Jinja2 + Mako</span></button>
+    <button class="preset-card" onclick="applyPreset('kernel')"><span class="text-sm text-red-400">Linux 内核</span><br/><span class="text-xs text-gray-600">UAF/OOB/竞态/提权</span></button>
+    <button class="preset-card" onclick="applyPreset('contract')"><span class="text-sm text-purple-400">智能合约</span><br/><span class="text-xs text-gray-600">重入/溢出/权限</span></button>
     <button class="preset-card" onclick="applyPreset('quick')"><span class="text-sm text-gray-300">极速模式</span><br/><span class="text-xs text-gray-600">禁用 Agent-S/E</span></button>
+    <button class="preset-card" onclick="applyPreset('benchmark')"><span class="text-sm text-cyan-400">OWASP Benchmark</span><br/><span class="text-xs text-gray-600">全类别评分</span></button>
   </div>
 </div>
 
@@ -51,6 +54,7 @@
             <option value="go">Go</option>
             <option value="csharp">C#</option>
             <option value="cpp">C++</option>
+            <option value="solidity">Solidity</option>
           </select>
         </div>
         <!-- Vuln types -->
@@ -93,6 +97,10 @@
         <!-- Toggles -->
         <div class="space-y-2">
           <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">Agent-T 代码库分类</span>
+            <div class="toggle-switch active" id="toggle-agent-t" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
             <span class="text-sm text-gray-400">Agent-R 语义审查</span>
             <div class="toggle-switch active" id="toggle-agent-r" onclick="this.classList.toggle('active')"></div>
           </div>
@@ -111,6 +119,17 @@
           <div class="flex items-center justify-between">
             <span class="text-sm text-gray-400">跳过编译 (--no-build)</span>
             <div class="toggle-switch" id="toggle-no-build" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="border-t border-gray-800 pt-2 mt-2">
+            <span class="text-xs text-gray-600 font-semibold">消融实验</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">CodeBrowser 智能上下文</span>
+            <div class="toggle-switch active" id="toggle-code-browser" onclick="this.classList.toggle('active')"></div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-400">强制通用 Prompt (消融)</span>
+            <div class="toggle-switch" id="toggle-generic-prompt" onclick="this.classList.toggle('active')"></div>
           </div>
         </div>
       </div>
@@ -152,6 +171,7 @@
       <div class="card-body">
         <div id="phase-list">
           <div class="phase-step" data-phase="clone"><div class="dot"></div><span>Phase 0 — 克隆仓库 / 框架检测</span></div>
+          <div class="phase-step" data-phase="classify"><div class="dot"></div><span>Phase 0.5 — Agent-T 代码库分类</span></div>
           <div class="phase-step" data-phase="create_database"><div class="dot"></div><span>Phase 1 — 创建 CodeQL 数据库</span></div>
           <div class="phase-step" data-phase="generate_query"><div class="dot"></div><span>Phase 2 — Agent-Q 规则合成</span></div>
           <div class="phase-step" data-phase="analyze"><div class="dot"></div><span>Phase 3 — CodeQL 扫描</span></div>
@@ -209,15 +229,43 @@ function toggleSource(type) {
 }
 toggleSource('github');
 
-// Load vuln catalog
-fetch('/api/vuln-catalog').then(r => r.json()).then(catalog => {
+// 每种语言允许显示的漏洞 category 白名单（简洁映射）
+const LANG_CATEGORIES = {
+  java:       ['injection','validation','crypto','info-leak','resource','supply-chain','mobile'],
+  python:     ['injection','validation','crypto','info-leak','resource','supply-chain'],
+  javascript: ['injection','validation','crypto','info-leak','resource','supply-chain'],
+  go:         ['injection','validation','crypto','info-leak','memory','concurrency','resource'],
+  csharp:     ['injection','validation','crypto','info-leak','resource'],
+  cpp:        ['injection','validation','crypto','info-leak','memory','concurrency','resource','kernel'],
+  solidity:   ['smart-contract','crypto'],
+};
+
+let _vulnCatalog = [];
+
+function renderVulnTypes(lang) {
+  const allowed = LANG_CATEGORIES[lang] || ['injection','validation','crypto','info-leak'];
+  const filtered = _vulnCatalog.filter(e => allowed.includes(e.category));
   const container = document.getElementById('vuln-type-list');
-  container.innerHTML = catalog.map(e =>
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="text-gray-600 text-xs py-2">该语言暂无预设漏洞类型</div>';
+    return;
+  }
+  container.innerHTML = filtered.map(e =>
     `<label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer hover:text-gray-200 py-0.5">
       <input type="checkbox" value="${e.name}" class="vuln-cb rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-0" />
       <span>${e.name}</span>
     </label>`
   ).join('');
+}
+
+// 初始化加载 catalog，并监听语言切换
+fetch('/api/vuln-catalog').then(r => r.json()).then(catalog => {
+  _vulnCatalog = catalog;
+  renderVulnTypes(document.getElementById('input-language').value);
+});
+
+document.getElementById('input-language').addEventListener('change', function() {
+  renderVulnTypes(this.value);
 });
 
 function getConfig() {
@@ -236,11 +284,14 @@ function getConfig() {
     parallel_workers: parseInt(document.getElementById('input-workers').value),
     min_confidence: parseFloat(document.getElementById('input-confidence').value),
     agent_e_host: document.getElementById('input-agent-e-host').value || undefined,
+    enable_agent_t: document.getElementById('toggle-agent-t').classList.contains('active'),
     enable_agent_r: document.getElementById('toggle-agent-r').classList.contains('active'),
     enable_agent_s: document.getElementById('toggle-agent-s').classList.contains('active'),
     enable_agent_e: document.getElementById('toggle-agent-e').classList.contains('active'),
     enable_rule_memory: document.getElementById('toggle-memory').classList.contains('active'),
     no_build: document.getElementById('toggle-no-build').classList.contains('active'),
+    enable_code_browser: document.getElementById('toggle-code-browser').classList.contains('active'),
+    force_generic_prompt: document.getElementById('toggle-generic-prompt').classList.contains('active'),
   };
 }
 
@@ -325,6 +376,7 @@ function connectSSE(taskId) {
 
 const PHASE_KEYWORDS = {
   'Phase 0': 'clone', '克隆': 'clone', '框架检测': 'clone',
+  'Agent-T': 'classify', '分类': 'classify', 'classify': 'classify',
   'Phase 1': 'create_database', '创建数据库': 'create_database', '建库': 'create_database',
   'Phase 2': 'generate_query', 'Agent-Q': 'generate_query',
   'Phase 3': 'analyze', 'CodeQL 扫描': 'analyze',
@@ -421,10 +473,28 @@ function applyPreset(name) {
   } else if (name === 'python-ssti') {
     document.getElementById('input-language').value = 'python';
     vulnCbs.forEach(cb => { if (cb.value.toLowerCase().includes('ssti') || cb.value.toLowerCase().includes('template')) cb.checked = true; });
+  } else if (name === 'kernel') {
+    document.getElementById('input-language').value = 'cpp';
+    const kernelKeys = ['kernel uaf','kernel oob','kernel race','kernel privilege','kernel null','kernel integer','kernel information','kernel double'];
+    vulnCbs.forEach(cb => { if (kernelKeys.some(k => cb.value.toLowerCase().includes(k.split(' ')[0]) && cb.value.toLowerCase().includes(k.split(' ')[1]))) cb.checked = true; });
+    document.getElementById('input-workers').value = '3';
+  } else if (name === 'contract') {
+    document.getElementById('input-language').value = 'solidity';
+    vulnCbs.forEach(cb => { if (['reentrancy','overflow','access control','integer'].some(k => cb.value.toLowerCase().includes(k))) cb.checked = true; });
   } else if (name === 'quick') {
     document.getElementById('toggle-agent-s').classList.remove('active');
     document.getElementById('toggle-agent-e').classList.remove('active');
     document.getElementById('toggle-no-build').classList.add('active');
+  } else if (name === 'benchmark') {
+    document.getElementById('input-language').value = 'java';
+    renderVulnTypes('java');
+    setTimeout(() => document.querySelectorAll('.vuln-cb').forEach(cb => cb.checked = true), 100);
+    document.getElementById('input-workers').value = '5';
+    document.getElementById('toggle-no-build').classList.add('active');
+    toggleSource('local');
+    document.querySelector('[data-src="local"]').classList.add('active');
+    document.querySelector('[data-src="github"]').classList.remove('active');
+    document.getElementById('input-source-dir').value = 'data/benchmark/BenchmarkJava';
   }
   updateYamlPreview();
 }
@@ -453,9 +523,12 @@ function updateYamlPreview() {
   yaml += `parallel_workers: ${c.parallel_workers}\n`;
   yaml += `min_confidence: ${c.min_confidence}\n`;
   if (c.agent_e_host) yaml += `agent_e_host: "${c.agent_e_host}"\n`;
+  yaml += `enable_agent_t: ${c.enable_agent_t}\n`;
   yaml += `no_agent_r: ${!c.enable_agent_r}\n`;
   yaml += `no_agent_s: ${!c.enable_agent_s}\n`;
   yaml += `no_agent_e: ${!c.enable_agent_e}\n`;
+  yaml += `enable_code_browser: ${c.enable_code_browser}\n`;
+  if (c.force_generic_prompt) yaml += `force_generic_prompt: true\n`;
   yaml += `enable_rule_memory: ${c.enable_rule_memory}\n`;
   yaml += `no_build: ${c.no_build}\n`;
   document.getElementById('yaml-preview').textContent = yaml;

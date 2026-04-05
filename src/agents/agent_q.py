@@ -35,11 +35,16 @@ MAX_RETRIES: int = 3
 
 # 按语言选择对应系统提示
 _SYSTEM_PROMPT_JAVA = """\
-你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 Java 安全漏洞（SQL注入、命令注入、路径穿越、SSRF、反序列化、表达式注入等）。
+你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 Java 安全漏洞，包括但不限于：
+- 注入类：SQL注入、命令注入、路径穿越、SSRF、反序列化、表达式注入
+- 密码学：弱加密算法、硬编码凭证、不安全随机数、不安全TLS配置
+- 资源管理：资源泄露、并发竞态
+- 信息泄露：敏感数据暴露、堆栈跟踪泄露
+
 你的输出必须是合法的、可以被 `codeql query compile` 编译通过的 .ql 源代码，且只输出代码本身，
 不要附带任何 markdown 代码块标记（如 ```ql）、解释或注释以外的文字。
 
-━━━━━━━━━━ 已验证可编译的 Java 黄金模板（必须严格遵守此结构）━━━━━━━━━━
+━━━━━━━━━━ 黄金模板 A：污点追踪查询（注入类漏洞）━━━━━━━━━━
 
 /**
  * @name <查询名称>
@@ -74,6 +79,45 @@ from DataFlow::Node source, DataFlow::Node sink
 where Flow::flow(source, sink)
 select sink, "漏洞描述，数据来自 $@。", source, "用户可控输入"
 
+━━━━━━━━━━ 黄金模板 B：模式匹配查询（密码学/配置/资源类问题）━━━━━━━━━━
+
+/**
+ * @name 使用不安全的加密算法
+ * @description 检测 MD5/SHA-1/DES 等已被破解的算法
+ * @kind problem
+ * @problem.severity warning
+ * @id java/weak-crypto-algorithm
+ * @tags security
+ *       cryptography
+ */
+import java
+
+from MethodCall mc
+where
+  mc.getMethod().hasQualifiedName("java.security", "MessageDigest", "getInstance") and
+  mc.getArgument(0).(CompileTimeConstantExpr).getStringValue().regexpMatch("(?i)(MD5|SHA-1|DES|RC4)")
+select mc, "使用了不安全的加密算法: " + mc.getArgument(0).(CompileTimeConstantExpr).getStringValue()
+
+━━━━━━━━━━ 黄金模板 C：硬编码凭证检测 ━━━━━━━━━━
+
+/**
+ * @name 硬编码密码/密钥
+ * @description 检测源代码中硬编码的密码或密钥
+ * @kind problem
+ * @problem.severity error
+ * @id java/hardcoded-credential
+ * @tags security
+ */
+import java
+
+from Assignment assign, Variable v
+where
+  v.getName().regexpMatch("(?i).*(password|passwd|secret|api_?key|token|credential).*") and
+  assign.getDest() = v.getAnAccess() and
+  assign.getSource() instanceof StringLiteral and
+  assign.getSource().(StringLiteral).getValue().length() > 3
+select assign, "变量 '" + v.getName() + "' 可能包含硬编码凭证"
+
 ━━━━━━━━━━ Java 关键规则（违反任何一条都会编译失败）━━━━━━━━━━
 1. 必须使用 import semmle.code.java.dataflow.FlowSources （RemoteFlowSource 在此模块）
 2. 禁止使用 semmle.code.java.security.* 路径（此路径不存在）
@@ -81,6 +125,7 @@ select sink, "漏洞描述，数据来自 $@。", source, "用户可控输入"
 4. 方法调用类型是 MethodCall，不是 MethodAccess
 5. hasQualifiedName 接受三个字符串参数：(包名, 类名, 方法名)
 6. DataFlow::ConfigSig 的 module 实现使用 implements 关键字，不需要 extends
+7. 模式匹配查询（模板 B/C）不需要 import TaintTracking 和 FlowSources，只需 import java
 """
 
 _SYSTEM_PROMPT_PYTHON = """\
@@ -281,11 +326,16 @@ select sink, "漏洞描述，数据来自 $@。", source, "用户可控输入"
 """
 
 _SYSTEM_PROMPT_CPP = """\
-你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 C/C++ 安全漏洞（命令注入、缓冲区溢出、格式化字符串、路径穿越、整数溢出等）。
+你是一位精通 CodeQL 静态分析的安全研究专家，擅长检测各类 C/C++ 安全漏洞，包括但不限于：
+- 注入类：命令注入、格式化字符串、路径穿越
+- 内存安全：缓冲区溢出、Use-After-Free、整数溢出、Double-Free
+- 资源管理：内存泄露、文件句柄泄露
+- 并发安全：竞态条件、数据竞争
+
 你的输出必须是合法的、可以被 `codeql query compile` 编译通过的 .ql 源代码，且只输出代码本身，
 不要附带任何 markdown 代码块标记（如 ```ql）、解释或注释以外的文字。
 
-━━━━━━━━━━ 已验证可编译的 C/C++ 黄金模板（必须严格遵守此结构）━━━━━━━━━━
+━━━━━━━━━━ 黄金模板 A：污点追踪查询（注入/格式化字符串类）━━━━━━━━━━
 
 /**
  * @name <查询名称>
@@ -334,13 +384,267 @@ from DataFlow::Node source, DataFlow::Node sink
 where Flow::flow(source, sink)
 select sink, "漏洞描述，数据来自 $@。", source, "用户可控输入"
 
+━━━━━━━━━━ 黄金模板 B：模式匹配查询（危险 API 使用 / 缓冲区溢出）━━━━━━━━━━
+
+/**
+ * @name 使用不安全的字符串函数
+ * @description 检测 strcpy/strcat/sprintf/gets 等无边界检查的函数
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/unsafe-string-function
+ * @tags security
+ *       memory-safety
+ */
+import cpp
+
+from FunctionCall fc
+where fc.getTarget().hasName(["strcpy", "strcat", "sprintf", "gets", "scanf"])
+select fc, "调用了不安全的函数 " + fc.getTarget().getName() + "，建议使用带长度限制的安全版本"
+
+━━━━━━━━━━ 黄金模板 C：整数溢出检测 ━━━━━━━━━━
+
+/**
+ * @name 整数溢出用于内存分配
+ * @description 算术运算结果未经检查直接用于 malloc 等内存分配函数
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/integer-overflow-allocation
+ * @tags security
+ *       memory-safety
+ */
+import cpp
+import semmle.code.cpp.dataflow.DataFlow
+
+from FunctionCall alloc, BinaryArithmeticOperation arith
+where
+  alloc.getTarget().hasName(["malloc", "calloc", "realloc", "alloca"]) and
+  DataFlow::localFlow(DataFlow::exprNode(arith), DataFlow::exprNode(alloc.getArgument(0)))
+select alloc, "内存分配大小来自未经检查的算术运算 $@。", arith, arith.toString()
+
 ━━━━━━━━━━ C/C++ 关键规则（违反任何一条都会编译失败）━━━━━━━━━━
-1. 必须导入 semmle.code.cpp.dataflow.TaintTracking 和 DataFlow
+1. 必须导入 semmle.code.cpp.dataflow.TaintTracking 和 DataFlow（污点追踪模板）
 2. C/C++ 没有标准 RemoteFlowSource，需自定义 ExternalInput（argv、getenv 等）
 3. 函数调用类型是 FunctionCall，用 fc.getTarget().hasName("<名称>") 匹配
 4. 获取参数用 fc.getArgument(n)，this.asExpr() = fc.getArgument(n)
 5. 同样使用 module Flow = TaintTracking::Global<FlowConfig> 和 implements 关键字
 6. 对于 C++ 类方法可用 fc.getTarget().hasQualifiedName("<命名空间>", "<函数名>")
+7. 模式匹配查询（模板 B）只需 import cpp，不需要 TaintTracking
+8. 本地数据流查询（模板 C）用 DataFlow::localFlow()
+"""
+
+# ---------------------------------------------------------------------------
+# Solidity / 智能合约 专用系统提示（v2.3 新增）
+# ---------------------------------------------------------------------------
+_SYSTEM_PROMPT_SOLIDITY = """\
+你是一位精通 Solidity 智能合约安全的静态分析专家。
+你的输出必须是合法的、可以被 CodeQL 编译通过的 .ql 源代码，且只输出代码本身。
+不要附带任何 markdown 代码块标记、解释或额外文字。
+
+CodeQL 对 Solidity 的实验性支持使用以下 import 路径和类型：
+- import solidity
+- 常用类型：FunctionCall, Function, StateVariable, Assignment, BinaryExpr, IfStmt, Expr
+- 可用谓词：getCallee(), getName(), getValue(), getAnArgument() 等
+
+────────────────────────
+黄金模板 1：重入攻击检测（@kind problem，模式匹配）
+────────────────────────
+/**
+ * @name Reentrancy vulnerability
+ * @description External call is made before state variable is updated
+ * @kind problem
+ * @problem.severity error
+ * @id solidity/reentrancy
+ * @tags security
+ *       smart-contract
+ */
+import solidity
+
+from FunctionCall externalCall, Assignment stateUpdate, Function f
+where
+  f = externalCall.getEnclosingFunction() and
+  f = stateUpdate.getEnclosingFunction() and
+  externalCall.getCallee().getName().matches("%call%") and
+  externalCall.getLocation().getStartLine() < stateUpdate.getLocation().getStartLine()
+select externalCall, "外部调用在状态更新之前执行，可能存在重入攻击风险"
+
+────────────────────────
+黄金模板 2：未检查的外部调用返回值
+────────────────────────
+/**
+ * @name Unchecked external call return value
+ * @description Return value of low-level call is not checked
+ * @kind problem
+ * @problem.severity warning
+ * @id solidity/unchecked-call
+ * @tags security
+ *       smart-contract
+ */
+import solidity
+
+from FunctionCall call
+where
+  call.getCallee().getName().regexpMatch("call|send|delegatecall") and
+  not exists(IfStmt ifStmt | ifStmt.getCondition().getAChildExpr*() = call)
+select call, "低层调用的返回值未被检查，可能导致资金丢失"
+
+────────────────────────
+支持的漏洞类型（优先模式匹配范式）：
+1. 重入攻击（Reentrancy） - 外部调用先于状态更新
+2. 未检查返回值（Unchecked call） - call/send/delegatecall 返回值未判断
+3. 整数溢出（Integer Overflow） - Solidity < 0.8 无内置溢出检查
+4. 权限控制缺失（Access Control） - 敏感函数缺少 onlyOwner 等修饰符
+5. 自毁攻击（Selfdestruct） - selfdestruct 函数未做权限校验
+6. tx.origin 认证（tx.origin Auth） - 使用 tx.origin 代替 msg.sender
+"""
+
+# ---------------------------------------------------------------------------
+# Linux Kernel C 专用系统提示（Agent-T kernel_module 模式）
+# ---------------------------------------------------------------------------
+_SYSTEM_PROMPT_KERNEL_C = """\
+你是一位精通 CodeQL 静态分析的 Linux 内核安全研究专家，擅长检测内核代码中的安全漏洞，包括但不限于：
+- 内存安全：Use-After-Free、Double-Free、缓冲区溢出（堆/栈）、整数溢出导致的内存分配错误
+- 用户态输入校验：copy_from_user/get_user 返回值未检查、__user 指针直接解引用
+- 竞态条件：锁保护不当、TOCTOU、引用计数错误
+- 权限提升：capability 检查缺失、ioctl handler 未鉴权
+- 信息泄露：未初始化内存通过 copy_to_user 泄露到用户态
+- 空指针解引用：kmalloc/kzalloc 返回值未判空
+
+你的输出必须是合法的、可以被 `codeql query compile` 编译通过的 .ql 源代码，且只输出代码本身，
+不要附带任何 markdown 代码块标记（如 ```ql）、解释或注释以外的文字。
+
+━━━━━━━━━━ 黄金模板 A：copy_from_user 返回值未检查 ━━━━━━━━━━
+
+/**
+ * @name Unchecked copy_from_user return value
+ * @description copy_from_user 返回值未检查可能导致未初始化内存使用
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/kernel-unchecked-copy-from-user
+ * @tags security
+ *       kernel
+ */
+import cpp
+
+from FunctionCall fc
+where
+  fc.getTarget().hasName("copy_from_user") and
+  not exists(IfStmt ifStmt |
+    ifStmt.getCondition().getAChild*() = fc
+    or
+    exists(AssignExpr assign |
+      assign.getRValue() = fc and
+      ifStmt.getCondition().getAChild*() = assign.getLValue().getAnAccess()
+    )
+  )
+select fc, "copy_from_user 的返回值未被检查，可能导致使用未初始化的内核缓冲区数据"
+
+━━━━━━━━━━ 黄金模板 B：kmalloc 返回值未判空 ━━━━━━━━━━
+
+/**
+ * @name Unchecked kmalloc return value
+ * @description kmalloc/kzalloc 返回值未判空可能导致空指针解引用
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/kernel-unchecked-kmalloc
+ * @tags security
+ *       kernel
+ *       memory-safety
+ */
+import cpp
+
+from FunctionCall alloc, Variable v
+where
+  alloc.getTarget().hasName(["kmalloc", "kzalloc", "kcalloc", "kmalloc_array", "vmalloc", "vzalloc"]) and
+  exists(AssignExpr assign |
+    assign.getRValue() = alloc and
+    assign.getLValue() = v.getAnAccess()
+  ) and
+  not exists(IfStmt ifStmt |
+    ifStmt.getCondition().getAChild*().(EqualityOperation).getAnOperand() = v.getAnAccess() or
+    ifStmt.getCondition().getAChild*().(NotExpr).getOperand() = v.getAnAccess() or
+    ifStmt.getCondition().getAChild*() = v.getAnAccess()
+  )
+select alloc, "内核内存分配函数 " + alloc.getTarget().getName() + " 的返回值未检查是否为 NULL"
+
+━━━━━━━━━━ 黄金模板 C：污点追踪（用户输入到危险 Sink）━━━━━━━━━━
+
+/**
+ * @name User-controlled data flows to dangerous kernel sink
+ * @description 用户态数据经 copy_from_user 进入内核后未经校验直接用于危险操作
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/kernel-tainted-sink
+ * @tags security
+ *       kernel
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class KernelUserInput extends DataFlow::Node {
+  KernelUserInput() {
+    exists(FunctionCall fc |
+      fc.getTarget().hasName(["copy_from_user", "__copy_from_user", "get_user", "__get_user"]) and
+      this.asExpr() = fc.getArgument(0)
+    )
+  }
+}
+
+private class KernelDangerousSink extends DataFlow::Node {
+  KernelDangerousSink() {
+    exists(FunctionCall fc |
+      fc.getTarget().hasName(["memcpy", "__memcpy", "memmove", "kmalloc", "kzalloc"]) and
+      this.asExpr() = fc.getArgument(fc.getTarget().hasName(["kmalloc", "kzalloc"]).booleanNot().booleanAnd(true).toString().toInt())
+    )
+    or
+    exists(ArrayExpr ae | this.asExpr() = ae.getArrayOffset())
+  }
+}
+
+module KernelFlowConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof KernelUserInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof KernelDangerousSink }
+}
+
+module KernelFlow = TaintTracking::Global<KernelFlowConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where KernelFlow::flow(source, sink)
+select sink, "用户态数据从 $@ 流入危险内核操作", source, "copy_from_user"
+
+━━━━━━━━━━ 黄金模板 D：kfree 后使用（UAF 模式匹配）━━━━━━━━━━
+
+/**
+ * @name Potential Use-After-Free via kfree
+ * @description kfree 释放内存后指针仍被使用
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/kernel-use-after-free
+ * @tags security
+ *       kernel
+ *       memory-safety
+ */
+import cpp
+
+from FunctionCall freeCall, VariableAccess useAfter, Variable v
+where
+  freeCall.getTarget().hasName(["kfree", "vfree", "kvfree"]) and
+  freeCall.getArgument(0) = v.getAnAccess() and
+  useAfter = v.getAnAccess() and
+  useAfter != freeCall.getArgument(0) and
+  useAfter.getLocation().getStartLine() > freeCall.getLocation().getStartLine() and
+  useAfter.getEnclosingFunction() = freeCall.getEnclosingFunction()
+select useAfter, "变量 '" + v.getName() + "' 在 $@ 被 kfree 释放后仍被使用", freeCall, "kfree 调用"
+
+━━━━━━━━━━ Linux 内核 C 关键规则 ━━━━━━━━━━
+1. 内核代码使用 cpp 语言包：import cpp
+2. C/C++ 没有标准 RemoteFlowSource，内核的 Source 是 copy_from_user / get_user / ioctl 参数
+3. 函数调用类型是 FunctionCall，用 fc.getTarget().hasName("<名称>") 匹配
+4. 内核特有分配函数：kmalloc, kzalloc, kcalloc, vmalloc, vzalloc, kmalloc_array
+5. 内核特有释放函数：kfree, vfree, kvfree, kfree_rcu
+6. 同步原语：spin_lock/spin_unlock, mutex_lock/mutex_unlock, rcu_read_lock/rcu_read_unlock
+7. 优先使用模式匹配（@kind problem）而非污点追踪，因为内核代码的数据流通常较短且局部
+8. 同样使用 module Flow = TaintTracking::Global<FlowConfig> 和 implements 关键字
 """
 
 # 通用系统提示（不认识的语言降级到此）
@@ -363,26 +667,65 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     "go":         _SYSTEM_PROMPT_GO,
     "csharp":     _SYSTEM_PROMPT_CSHARP,
     "cpp":        _SYSTEM_PROMPT_CPP,
+    "solidity":   _SYSTEM_PROMPT_SOLIDITY,
+    "kernel":     _SYSTEM_PROMPT_KERNEL_C,
 }
 
 
-def _get_system_prompt(language: str) -> str:
-    """按语言返回对应的系统提示。"""
+def _get_system_prompt(language: str, prompt_preset: str = "") -> str:
+    """按语言或 prompt_preset 返回对应的系统提示。
+
+    prompt_preset 优先于 language（由 Agent-T 的 CodebaseProfile 指定）。
+    """
+    if prompt_preset:
+        hit = _SYSTEM_PROMPTS.get(prompt_preset.lower())
+        if hit:
+            return hit
     return _SYSTEM_PROMPTS.get(language.lower(), _SYSTEM_PROMPT_GENERIC)
 
 
 _INITIAL_GENERATION_TEMPLATE = """\
-请基于上方的黄金模板，为以下目标生成 CodeQL 污点追踪查询：
+请为以下目标生成 CodeQL 查询：
 
 - **目标语言**：{language}
 - **漏洞类型**：{vuln_type}
-- **已知危险 Sink 方法**：{sink_hints}
+- **已知危险 Sink 方法 / 匹配特征**：{sink_hints}
+
+查询范式选择指引（根据漏洞类型自动选择最合适的查询模式）：
+
+**A. 污点追踪查询（Source → Sink 数据流）**
+适用于：注入类漏洞（SQL注入/命令注入/XSS/SSRF/路径穿越/表达式注入/反序列化等）
+→ 使用上方系统提示中的污点追踪黄金模板
+
+**B. 模式匹配查询（@kind problem，无需数据流）**
+适用于：硬编码凭证、弱加密算法、不安全随机数、不安全TLS配置、资源泄露、危险API使用
+→ 直接匹配 AST 模式，示例结构：
+```ql
+/**
+ * @name <查询名>
+ * @description <描述>
+ * @kind problem
+ * @problem.severity warning
+ * @id {language}/<漏洞类型小写连字符>
+ * @tags security
+ */
+import {language}
+
+from <表达式类型> expr
+where <匹配条件>
+select expr, "问题描述"
+```
+
+**C. 本地数据流查询（无需远程 Source，仅追踪本地数据流）**
+适用于：整数溢出、格式化字符串、缓冲区溢出（C/C++）
+→ 使用 DataFlow::localFlow() 或局部步骤
 
 任务：
-1. 完全复用黄金模板的结构，只替换 <占位符> 部分。
-2. CustomSink 中填入实际的危险 Sink 方法（可定义多个 or 分支）。
-3. @id 使用 {language}/<漏洞类型小写连字符> 格式。
-4. 直接输出完整 .ql 代码，不要加任何 markdown 包装或解释文字。
+1. 根据漏洞类型选择最合适的查询范式（A/B/C）。
+2. 如果是范式 A，复用黄金模板的结构，只替换 <占位符>。
+3. 如果是范式 B/C，生成对应的 @kind problem 或本地数据流查询。
+4. @id 使用 {language}/<漏洞类型小写连字符> 格式。
+5. 直接输出完整 .ql 代码，不要加任何 markdown 包装或解释文字。
 """
 
 _FIX_TEMPLATE = """\
@@ -417,6 +760,7 @@ _LANG_TO_CODEQL_PACK: dict[str, str] = {
     "go":         "codeql/go-all",
     "csharp":     "codeql/csharp-all",
     "cpp":        "codeql/cpp-all",
+    "solidity":   "codeql/solidity-all",
 }
 
 # ---------------------------------------------------------------------------
@@ -433,6 +777,15 @@ _DEFAULT_SINK_HINTS: dict[str, str] = {
         "jinja2.Environment.from_string, "
         "jinja2.Template, "
         "mako.template.Template"
+    ),
+    "kernel": (
+        "copy_from_user, __copy_from_user, get_user, __get_user, "
+        "kmalloc, kzalloc, kcalloc, vmalloc, vzalloc, kmalloc_array, "
+        "kfree, vfree, kvfree, kfree_rcu, "
+        "memcpy, __memcpy, memmove, memset, "
+        "spin_lock, spin_unlock, mutex_lock, mutex_unlock, "
+        "rcu_read_lock, rcu_read_unlock, rcu_dereference, "
+        "capable, ns_capable"
     ),
 }
 
@@ -584,6 +937,7 @@ class AgentQ:
         query_name: Optional[str] = None,
         few_shot_examples: Optional[list[str]] = None,
         detected_frameworks: Optional[set[str]] = None,
+        prompt_preset: str = "",
     ) -> Path:
         """
         生成 CodeQL 查询代码并通过编译检查；失败时自动修复，最多重试。
@@ -605,10 +959,12 @@ class AgentQ:
             RuntimeError: 当达到最大重试次数后仍无法通过编译时抛出。
         """
         # 优先使用用户指定的 sink_hints，其次从通用漏洞目录查询，最后用语言默认值
+        # prompt_preset 为 "kernel" 时优先使用内核 sink hints
+        _effective_lang = prompt_preset if prompt_preset and prompt_preset in _DEFAULT_SINK_HINTS else language.lower()
         _sink_hints = (
             sink_hints
             or vuln_catalog.get_sink_hints(vuln_type, language)
-            or _DEFAULT_SINK_HINTS.get(language.lower(), "（未指定，请根据目标框架推断）")
+            or _DEFAULT_SINK_HINTS.get(_effective_lang, "（未指定，请根据目标框架推断）")
         )
         _name_prefix = query_name or f"{language}_{vuln_type}".replace(" ", "_")
         _filename = f"{_name_prefix}_{uuid.uuid4().hex[:8]}.ql"
@@ -646,8 +1002,8 @@ class AgentQ:
                 vuln_type=vuln_type,
                 sink_hints=_sink_hints,
             ) + few_shot_section + framework_section
-            # 使用与语言匹配的系统提示
-            sys_prompt = _get_system_prompt(language)
+            # 使用与语言匹配的系统提示（prompt_preset 优先）
+            sys_prompt = _get_system_prompt(language, prompt_preset=prompt_preset)
             raw_output = self._invoke_llm(sys_prompt, human_prompt)
             current_code = _extract_ql_code(raw_output)
 
@@ -655,7 +1011,7 @@ class AgentQ:
         logger.info("初始 .ql 代码已就绪，开始编译验证...")
 
         # ── 第 2 步：自修复循环 ──────────────────────────────────────────
-        sys_prompt = _get_system_prompt(language)
+        sys_prompt = _get_system_prompt(language, prompt_preset=prompt_preset)
         error_msg = ""
         for attempt in range(1, self.max_retries + 1):
             success, error_msg = self.runner.compile_query(str(query_file))

@@ -1,7 +1,7 @@
 """
 QRSE-X 系统 CLI 入口。
 
-支持三种扫描模式：
+支持四种扫描模式：
   # 本地目录 · 单漏洞类型
   python -m src.main --source-dir ./target --language java --vuln-type "Spring EL Injection"
 
@@ -12,6 +12,9 @@ QRSE-X 系统 CLI 入口。
   # 多漏洞并行扫描（建库一次，共享数据库）
   python -m src.main --github-url https://github.com/WebGoat/WebGoat `
       --language java --vuln-types "Spring EL Injection" "OGNL Injection" "MVEL Injection"
+
+  # Agent-P 自主模式（自动侦察 → 规划 → 执行 → 评估）
+  python -m src.main --source-dir ./target --auto
 
   # 环境健康检查
   python -m src.main --check
@@ -551,6 +554,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--codeql-db", default=None, metavar="PATH",
         help="指定已存在的 CodeQL 数据库路径，跳过建库阶段（如 data/databases/benchmark_db）",
     )
+    parser.add_argument(
+        "--agent-r-workers", type=int, default=1, metavar="N",
+        help="Agent-R 并发线程数（默认 1 串行，建议 2~4）",
+    )
+    parser.add_argument(
+        "--agent-r-batch", type=int, default=1, metavar="N",
+        help="Agent-R 每次 LLM 调用包含的 finding 数（默认 1 逐条，建议 5~10 可大幅加速）",
+    )
+    # ── 外部 SARIF 导入（IaC/第三方工具结果）──────────────────────────
+    parser.add_argument(
+        "--external-sarif", default=None, metavar="PATH",
+        help="导入外部 SARIF 文件（Checkov/tfsec/Trivy/Semgrep 等输出），跳过 Agent-Q + CodeQL 阶段，直接进入 Agent-R 审查",
+    )
+    # ── 供应链安全分析 ──────────────────────────────────────────────
+    parser.add_argument(
+        "--sca", action="store_true",
+        help="启用供应链安全分析（SCA）：解析依赖 → OSV漏洞查询 → Typosquatting检测",
+    )
+    # ── 二进制/固件分析 ─────────────────────────────────────────────
+    parser.add_argument(
+        "--firmware", default=None, metavar="PATH",
+        help="固件镜像路径，启用 Binwalk 解包 + 二进制分析流水线",
+    )
+    parser.add_argument(
+        "--ghidra-home", default=None, metavar="PATH",
+        help="Ghidra 安装目录（用于二进制反编译分析）",
+    )
+    # ── Agent-P 自主模式 ──────────────────────────────────────────────
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="启用 Agent-P 自主模式：自动侦察仓库 → 规划扫描策略 → 多轮执行 → 评估自适应。无需指定 --vuln-type",
+    )
     # ── Patch-Aware 模式（受 K-REPRO 启发）──────────────────────────
     parser.add_argument(
         "--patch-commit", default=None, metavar="HASH",
@@ -650,10 +685,10 @@ def main() -> None:
     # ── 常规扫描：校验必填参数 ────────────────────────────────────────
     if not args.source_dir and not args.github_url:
         parser.error("扫描模式下必须提供 --source-dir 或 --github-url")
-    if not args.language:
-        parser.error("必须提供 --language")
-    if not args.vuln_type and not args.vuln_types:
-        parser.error("必须提供 --vuln-type 或 --vuln-types")
+    if not args.language and not getattr(args, "auto", False):
+        parser.error("必须提供 --language（或使用 --auto 自动推断）")
+    if not args.vuln_type and not args.vuln_types and not getattr(args, "auto", False):
+        parser.error("必须提供 --vuln-type 或 --vuln-types（或使用 --auto 自主模式）")
 
     # ── API Key ───────────────────────────────────────────────────────
     if args.openai_api_key:
@@ -681,10 +716,11 @@ def main() -> None:
     from src.utils.html_reporter import export_html
     from src.utils.scan_history import ScanHistory
 
-    vuln_types: list[str] = args.vuln_types or [args.vuln_type]
+    is_auto_mode = getattr(args, "auto", False)
+    vuln_types: list[str] = args.vuln_types or ([args.vuln_type] if args.vuln_type else ["_auto_"])
 
     base_config = PipelineConfig(
-        language=args.language,
+        language=args.language or "java",
         vuln_type=vuln_types[0],
         source_dir=resolved_source,
         github_url=getattr(args, "github_url", None),
@@ -707,16 +743,64 @@ def main() -> None:
         patch_commit=getattr(args, "patch_commit", None),
         enable_code_browser=not getattr(args, "no_code_browser", False),
         prebuilt_db=getattr(args, "codeql_db", None),
+        agent_r_workers=getattr(args, "agent_r_workers", 1),
+        agent_r_batch=getattr(args, "agent_r_batch", 1),
+        external_sarif=getattr(args, "external_sarif", None),
     )
 
     import time
     _t_start = time.monotonic()
 
-    try:
-        states = _run_with_progress(base_config, vuln_types, args.parallel_workers)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]用户中断执行。[/yellow]")
-        sys.exit(0)
+    if is_auto_mode:
+        # ── Agent-P 自主模式 ──────────────────────────────────────────
+        console.print(Panel(
+            "[bold cyan]Agent-P 自主模式[/bold cyan]\n"
+            "侦察 → 规划 → 执行 → 评估 → 自适应循环",
+            title="QRSE-X Auto",
+        ))
+        try:
+            auto_result = Coordinator.run_with_planner(base_config)
+            states = auto_result.get("all_states", [])
+            # 输出侦察报告、Agent-T 分类和扫描计划
+            recon = auto_result.get("recon_report")
+            profile = auto_result.get("codebase_profile")
+            plan = auto_result.get("scan_plan")
+            if recon:
+                console.print(Panel(recon.to_summary(), title="侦察报告"))
+            if profile:
+                console.print(Panel(profile.to_summary(), title="Agent-T 代码库分类"))
+            if plan:
+                plan_table = Table(title="扫描计划", box=box.SIMPLE)
+                plan_table.add_column("优先级", width=6)
+                plan_table.add_column("漏洞类型", min_width=20)
+                plan_table.add_column("理由")
+                plan_table.add_column("状态", width=8)
+                plan_table.add_column("发现", width=6)
+                for t in plan.tasks:
+                    plan_table.add_row(
+                        str(t.priority), t.vuln_type, t.reason,
+                        t.status, str(t.findings_count),
+                    )
+                console.print(plan_table)
+            console.print(
+                f"\n[bold green]自主扫描完成[/bold green] | "
+                f"轮次: {auto_result.get('rounds_completed', 0)} | "
+                f"漏洞: {auto_result.get('total_vulnerabilities', 0)} | "
+                f"PoC: {auto_result.get('total_confirmed_pocs', 0)}"
+            )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]用户中断执行。[/yellow]")
+            sys.exit(0)
+        except Exception as exc:
+            console.print(f"[red]Agent-P 自主模式失败: {exc}[/red]")
+            logger.exception("Agent-P 自主模式异常")
+            sys.exit(1)
+    else:
+        try:
+            states = _run_with_progress(base_config, vuln_types, args.parallel_workers)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]用户中断执行。[/yellow]")
+            sys.exit(0)
 
     elapsed = time.monotonic() - _t_start
 

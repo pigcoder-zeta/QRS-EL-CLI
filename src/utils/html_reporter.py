@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.orchestrator.coordinator import PipelineState
 
-_TOOL_VERSION = "0.5.0"
+_TOOL_VERSION = "2.4.0"
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +280,7 @@ def export_html(
     output_path: str,
     language: str = "",
     title: str = "QRSE-X 扫描报告",
+    codebase_type: str = "",
 ) -> str:
     """
     将扫描结果导出为自包含 HTML 报告。
@@ -338,10 +339,11 @@ def export_html(
 <header>
   <div class="container">
     <div>
-      <div class="logo">QRS<span>-EL</span></div>
+      <div class="logo">QRSE<span>-X</span></div>
       <div class="meta">
-        语言: {_e(language or "未知")} &nbsp;·&nbsp;
-        生成时间: {now} &nbsp;·&nbsp;
+        语言: {_e(language or "未知")}
+        {' &nbsp;·&nbsp; 代码库类型: ' + _e(codebase_type) if codebase_type else ''}
+        &nbsp;·&nbsp; 生成时间: {now} &nbsp;·&nbsp;
         版本: {_TOOL_VERSION}
       </div>
     </div>
