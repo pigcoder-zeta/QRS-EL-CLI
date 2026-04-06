@@ -364,9 +364,25 @@ def api_vuln_catalog():
 # API — Benchmark 评分
 # ---------------------------------------------------------------------------
 
+@app.route("/api/benchmark/presets")
+def api_benchmark_presets():
+    """返回可用的 Benchmark 预设列表。"""
+    presets = [
+        {"key": "owasp",    "label": "OWASP Benchmark v1.2", "language": "java",
+         "desc": "Java | 2,740 用例 | 11 CWE 类别"},
+        {"key": "juliet",   "label": "Juliet Test Suite v1.3", "language": "cpp",
+         "desc": "C/C++/Java | 64,000+ 用例 | 118 CWE"},
+        {"key": "cvebench", "label": "CVE-Bench", "language": "java",
+         "desc": "真实 CVE 复现 | 多语言"},
+        {"key": "custom",   "label": "自定义测试集", "language": "java",
+         "desc": "手动指定路径"},
+    ]
+    return jsonify(presets)
+
+
 @app.route("/api/benchmark/score", methods=["POST"])
 def api_benchmark_score():
-    """对指定 SARIF 文件进行 OWASP Benchmark 评分。"""
+    """对指定 SARIF 文件进行 Benchmark 评分（支持多种测试集）。"""
     import sys
     sys.path.insert(0, str(_PROJECT_ROOT))
     from scripts.score_benchmark import (
@@ -374,18 +390,20 @@ def api_benchmark_score():
     )
     payload = request.get_json(force=True)
     sarif_path = payload.get("sarif_path", "")
-    expected_csv = payload.get(
-        "expected_csv",
-        str(_PROJECT_ROOT / "data" / "benchmark" / "BenchmarkJava" / "expectedresults-1.2.csv"),
-    )
+    benchmark_type = payload.get("benchmark_type", "owasp")
+    expected_csv = payload.get("expected_csv", "")
+    if not expected_csv:
+        expected_csv = str(
+            _PROJECT_ROOT / "data" / "benchmark" / "BenchmarkJava" / "expectedresults-1.2.csv"
+        )
 
     sarif_full = _PROJECT_ROOT / sarif_path if not Path(sarif_path).is_absolute() else Path(sarif_path)
     if not sarif_full.exists():
         return jsonify({"error": f"SARIF 文件不存在: {sarif_path}"}), 404
 
     try:
-        expected = parse_expected_csv(str(expected_csv))
-        findings = parse_sarif_findings(str(sarif_full))
+        expected = parse_expected_csv(str(expected_csv), benchmark_type=benchmark_type)
+        findings = parse_sarif_findings(str(sarif_full), benchmark_type=benchmark_type)
         seen: set[tuple[str, str]] = set()
         deduped = []
         for f in findings:
@@ -399,6 +417,7 @@ def api_benchmark_score():
         result = {
             "tool": score.tool_name,
             "sarif_path": sarif_path,
+            "benchmark_type": benchmark_type,
             "total_findings": score.total_findings,
             "overall": {
                 "tp": score.overall_tp, "fp": score.overall_fp,
@@ -430,16 +449,30 @@ def api_benchmark_score():
         return jsonify({"error": str(exc)}), 500
 
 
+_SCORE_FILE_PREFIXES = (
+    "benchmark_score", "juliet_score", "cvebench_score", "custom_score",
+)
+
+
 @app.route("/api/benchmark/scores")
 def api_benchmark_scores():
-    """返回所有已保存的 Benchmark 评分结果。"""
+    """返回所有已保存的评分结果（支持多种 Benchmark 前缀）。"""
     scores = []
     results_dir = _PROJECT_ROOT / "data" / "results"
     if results_dir.exists():
-        for f in sorted(results_dir.glob("benchmark_score*.json")):
+        for f in sorted(results_dir.iterdir()):
+            if not f.name.endswith(".json"):
+                continue
+            if not any(f.name.startswith(p) for p in _SCORE_FILE_PREFIXES):
+                continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 data["_filename"] = f.name
+                if "benchmark_type" not in data:
+                    for p in _SCORE_FILE_PREFIXES:
+                        if f.name.startswith(p):
+                            data["benchmark_type"] = p.replace("_score", "")
+                            break
                 scores.append(data)
             except Exception:
                 pass

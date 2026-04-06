@@ -262,6 +262,7 @@ def _patch_scan_manager():
                 "data/benchmark/BenchmarkJava/expectedresults-1.2.csv",
             ))
             language = cfg.get("language", "java")
+            benchmark_type = cfg.get("benchmark_type", "owasp")
             workers = int(cfg.get("workers", 4))
             batch = int(cfg.get("batch", 10))
 
@@ -273,7 +274,7 @@ def _patch_scan_manager():
                 parse_expected_csv, parse_sarif_findings, compute_score, save_json,
             )
 
-            expected = parse_expected_csv(expected_csv)
+            expected = parse_expected_csv(expected_csv, benchmark_type=benchmark_type)
             full_output_sarif = ""
 
             for idx, variant in enumerate(_ABLATION_VARIANTS):
@@ -284,7 +285,9 @@ def _patch_scan_manager():
                 logger.info("[Ablation] ===== %s (%s) =====", task["label"], task_name)
 
                 output_sarif = str(results_dir / f"ablation_{suite.suite_id}_{task_name}.sarif")
-                score_file = str(results_dir / f"benchmark_score_ablation_{task_name}.json")
+                _prefix = {"owasp": "benchmark", "juliet": "juliet",
+                           "cvebench": "cvebench", "custom": "custom"}.get(benchmark_type, "benchmark")
+                score_file = str(results_dir / f"{_prefix}_score_ablation_{task_name}.json")
 
                 try:
                     if variant["skip_agent_r"] is True:
@@ -334,13 +337,12 @@ def _patch_scan_manager():
                     if task_name == "full":
                         full_output_sarif = output_sarif
 
-                    # 自动评分
-                    findings = parse_sarif_findings(output_sarif)
+                    findings = parse_sarif_findings(output_sarif, benchmark_type=benchmark_type)
                     seen: set[tuple[str, str]] = set()
                     deduped = [f for f in findings if (f.test_name, f.category) not in seen and not seen.add((f.test_name, f.category))]
                     score = compute_score(expected, deduped)
                     score.sarif_files = 1
-                    save_json(score, score_file)
+                    save_json(score, score_file, benchmark_type=benchmark_type)
 
                     task["output_sarif"] = output_sarif
                     task["score_file"] = score_file

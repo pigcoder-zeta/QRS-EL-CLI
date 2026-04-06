@@ -1,13 +1,15 @@
 {% extends "layout.html" %}
-{% block title %}QRSE-X - Benchmark 评分{% endblock %}
+{% block title %}QRSE-X - 评估中心{% endblock %}
 
 {% block content %}
-<div class="mb-6 flex items-center justify-between">
+<div class="mb-6 flex items-center justify-between flex-wrap gap-3">
   <div>
-    <h2 class="text-2xl font-bold">OWASP Benchmark 评分</h2>
-    <p class="text-gray-500 text-sm mt-1">对比各配置的 TP/FP/Precision/Recall/F1/Youden 指标</p>
+    <h2 class="text-2xl font-bold">评估中心</h2>
+    <p class="text-gray-500 text-sm mt-1">跨测试集对比 TP/FP/Precision/Recall/F1/Youden 指标</p>
   </div>
-  <div class="flex gap-2">
+  <div class="flex gap-2 items-center flex-wrap">
+    <select id="bench-selector" class="form-input text-xs py-1 px-2" style="width:auto;min-width:200px" onchange="onPresetChange()">
+    </select>
     <button class="btn btn-primary btn-sm" onclick="showScoreDialog()">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
       新建评分
@@ -20,20 +22,85 @@
   </div>
 </div>
 
+<!-- Benchmark info banner -->
+<div id="bench-info" class="mb-4 p-3 rounded-lg text-xs flex justify-between items-center gap-3" style="background:rgba(31,41,55,0.6);border:1px solid rgba(55,65,81,0.5)">
+  <div class="flex items-center gap-3">
+    <span id="bench-info-icon" class="text-2xl">&#x1F4CA;</span>
+    <div>
+      <div id="bench-info-label" class="font-semibold text-gray-200"></div>
+      <div id="bench-info-desc" class="text-gray-500"></div>
+    </div>
+  </div>
+  <button id="btn-delete-custom" class="hidden text-red-400 hover:text-red-300 mr-2" title="删除此自定义预设" onclick="deleteCurrentCustomPreset()">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+  </button>
+</div>
+
+<!-- Custom preset form -->
+<div id="custom-preset-form" class="card mb-4 hidden" style="border-color:#10b981">
+  <div class="card-header" style="background:linear-gradient(135deg,rgba(16,185,129,0.15),rgba(52,211,153,0.10))">
+    <span class="font-semibold text-sm text-green-400">添加自定义测试集预设</span>
+    <button class="text-gray-500 hover:text-gray-300" onclick="cancelCustomPreset()">&times;</button>
+  </div>
+  <div class="card-body space-y-3">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div>
+        <label class="form-label">预设名称 (必填)</label>
+        <input id="cp-name" class="form-input" placeholder="例如：MyWebGoat" />
+      </div>
+      <div>
+        <label class="form-label">目标语言</label>
+        <select id="cp-lang" class="form-input text-xs">
+          <option value="java">Java</option>
+          <option value="python">Python</option>
+          <option value="javascript">JavaScript</option>
+          <option value="go">Go</option>
+          <option value="csharp">C#</option>
+          <option value="cpp">C/C++</option>
+          <option value="solidity">Solidity</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">默认 SARIF 路径</label>
+        <input id="cp-sarif" class="form-input" placeholder="留空则无默认值" />
+      </div>
+      <div>
+        <label class="form-label">标准答案 CSV 路径</label>
+        <input id="cp-csv" class="form-input" placeholder="留空则无默认值" />
+      </div>
+      <div class="md:col-span-2">
+        <label class="form-label">源码仓库路径</label>
+        <input id="cp-repo" class="form-input" placeholder="一键消融实验必须提供" />
+      </div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-sm" style="background:linear-gradient(135deg,#10b981,#34d399);color:#fff" onclick="saveCustomPreset()">
+        保存预设
+      </button>
+      <button class="btn btn-secondary btn-sm" onclick="cancelCustomPreset()">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- Score dialog -->
 <div id="score-dialog" class="card mb-4 hidden">
   <div class="card-header">
-    <span class="font-semibold text-sm">对 SARIF 文件评分</span>
+    <span class="font-semibold text-sm" id="score-dialog-title">对 SARIF 文件评分</span>
     <button class="text-gray-500 hover:text-gray-300" onclick="document.getElementById('score-dialog').classList.add('hidden')">&times;</button>
   </div>
   <div class="card-body space-y-3">
     <div>
-      <label class="form-label">SARIF 文件路径</label>
-      <input id="input-sarif-path" class="form-input" placeholder="data/results/benchmark/sarif_agent_r_allcwe.sarif" />
+      <label class="form-label">Benchmark 类型</label>
+      <select id="input-bench-type" class="form-input text-xs" onchange="onScoreBenchChange()">
+      </select>
     </div>
     <div>
-      <label class="form-label">标准答案 CSV</label>
-      <input id="input-expected-csv" class="form-input" value="data/benchmark/BenchmarkJava/expectedresults-1.2.csv" />
+      <label class="form-label">SARIF 文件路径</label>
+      <input id="input-sarif-path" class="form-input" placeholder="" />
+    </div>
+    <div>
+      <label class="form-label">标准答案文件</label>
+      <input id="input-expected-csv" class="form-input" value="" />
     </div>
     <div class="flex gap-2">
       <button class="btn btn-primary btn-sm" onclick="runScore()">开始评分</button>
@@ -54,15 +121,15 @@
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
       <div>
         <label class="form-label">原始 SARIF 路径</label>
-        <input id="abl-sarif" class="form-input" value="data/results/benchmark/sarif_all_cwe.sarif" />
+        <input id="abl-sarif" class="form-input" value="" />
       </div>
       <div>
         <label class="form-label">源码仓库路径</label>
-        <input id="abl-repo" class="form-input" value="data/benchmark/BenchmarkJava" />
+        <input id="abl-repo" class="form-input" value="" />
       </div>
       <div>
-        <label class="form-label">标准答案 CSV</label>
-        <input id="abl-csv" class="form-input" value="data/benchmark/BenchmarkJava/expectedresults-1.2.csv" />
+        <label class="form-label">标准答案文件</label>
+        <input id="abl-csv" class="form-input" value="" />
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
@@ -106,6 +173,7 @@
     <div class="overflow-x-auto">
       <table class="data-table text-sm">
         <thead><tr>
+          <th>测试集</th>
           <th>配置</th>
           <th>Findings</th>
           <th class="text-green-400">TP</th>
@@ -119,7 +187,7 @@
           <th>Youden</th>
         </tr></thead>
         <tbody id="compare-tbody">
-          <tr><td colspan="11" class="text-center text-gray-600 py-6">加载中...</td></tr>
+          <tr><td colspan="12" class="text-center text-gray-600 py-6">加载中...</td></tr>
         </tbody>
       </table>
     </div>
@@ -129,13 +197,13 @@
 <!-- Per-category charts -->
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
   <div class="card">
-    <div class="card-header"><span class="font-semibold text-sm">各 CWE 类别 F1 Score</span></div>
+    <div class="card-header"><span class="font-semibold text-sm">各类别 F1 Score</span></div>
     <div class="card-body" style="min-height:300px">
       <canvas id="chart-f1"></canvas>
     </div>
   </div>
   <div class="card">
-    <div class="card-header"><span class="font-semibold text-sm">各 CWE 类别 Youden Index</span></div>
+    <div class="card-header"><span class="font-semibold text-sm">各类别 Youden Index</span></div>
     <div class="card-body" style="min-height:300px">
       <canvas id="chart-youden"></canvas>
     </div>
@@ -165,11 +233,198 @@
 
 {% block scripts %}
 <script>
+// ---------------------------------------------------------------------------
+// Benchmark 预设配置
+// ---------------------------------------------------------------------------
+const BUILTIN_PRESETS = [
+  {
+    key: 'owasp',
+    label: 'OWASP Benchmark v1.2',
+    desc: 'Java | 2,740 用例 | 11 CWE 类别',
+    icon: '\u{1F3AF}',
+    default_sarif: 'data/results/benchmark/sarif_all_cwe.sarif',
+    default_csv: 'data/benchmark/BenchmarkJava/expectedresults-1.2.csv',
+    default_repo: 'data/benchmark/BenchmarkJava',
+    language: 'java',
+    score_prefix: 'benchmark_score',
+  },
+  {
+    key: 'juliet',
+    label: 'Juliet Test Suite v1.3',
+    desc: 'C/C++/Java | 64,000+ 用例 | 118 CWE',
+    icon: '\u{1F9EA}',
+    default_sarif: 'data/results/juliet/sarif_all.sarif',
+    default_csv: 'data/benchmark/Juliet/manifest.csv',
+    default_repo: 'data/benchmark/Juliet',
+    language: 'cpp',
+    score_prefix: 'juliet_score',
+  },
+  {
+    key: 'cvebench',
+    label: 'CVE-Bench',
+    desc: '真实 CVE 复现 | 多语言 | 端到端验证',
+    icon: '\u{1F6E1}',
+    default_sarif: 'data/results/cvebench/sarif_all.sarif',
+    default_csv: 'data/benchmark/CVE-Bench/expected.csv',
+    default_repo: 'data/benchmark/CVE-Bench',
+    language: 'java',
+    score_prefix: 'cvebench_score',
+  }
+];
+
+let BENCH_PRESETS = [];
+
+let currentPreset = null;
 let allScores = [];
 let chartF1 = null, chartYouden = null;
 
-document.addEventListener('DOMContentLoaded', loadScores);
+document.addEventListener('DOMContentLoaded', function() {
+  loadCustomPresetsFromStorage();
+  initPresetSelectors();
+  onPresetChange();
+  loadScores();
+});
 
+function loadCustomPresetsFromStorage() {
+  BENCH_PRESETS = [...BUILTIN_PRESETS];
+  try {
+    const saved = JSON.parse(localStorage.getItem('custom_bench_presets') || '[]');
+    BENCH_PRESETS.push(...saved);
+  } catch (e) {
+    console.error('Failed to load custom presets', e);
+  }
+}
+
+function saveCustomPresetsToStorage() {
+  const customs = BENCH_PRESETS.filter(p => p.key.startsWith('custom_'));
+  localStorage.setItem('custom_bench_presets', JSON.stringify(customs));
+}
+
+function initPresetSelectors(selectedKey = null) {
+  const sel = document.getElementById('bench-selector');
+  const scoreSel = document.getElementById('input-bench-type');
+  
+  sel.innerHTML = '';
+  scoreSel.innerHTML = '';
+  
+  BENCH_PRESETS.forEach(p => {
+    sel.innerHTML += `<option value="${p.key}">${p.icon} ${p.label}</option>`;
+    scoreSel.innerHTML += `<option value="${p.key}">${p.label}</option>`;
+  });
+  
+  sel.innerHTML += `<option value="__add_custom__">➕ 添加自定义测试集</option>`;
+  
+  if (selectedKey) {
+    sel.value = selectedKey;
+  } else if (!sel.value && BENCH_PRESETS.length > 0) {
+    sel.value = BENCH_PRESETS[0].key;
+  }
+}
+
+function getPreset(key) {
+  return BENCH_PRESETS.find(p => p.key === key) || BENCH_PRESETS[0];
+}
+
+function onPresetChange() {
+  const key = document.getElementById('bench-selector').value;
+  const form = document.getElementById('custom-preset-form');
+  const info = document.getElementById('bench-info');
+  const btnDelete = document.getElementById('btn-delete-custom');
+  
+  if (key === '__add_custom__') {
+    form.classList.remove('hidden');
+    info.classList.add('hidden');
+    document.getElementById('cp-name').value = '';
+    document.getElementById('cp-sarif').value = '';
+    document.getElementById('cp-csv').value = '';
+    document.getElementById('cp-repo').value = '';
+    return;
+  }
+  
+  form.classList.add('hidden');
+  info.classList.remove('hidden');
+  
+  currentPreset = getPreset(key);
+  document.getElementById('bench-info-icon').textContent = currentPreset.icon;
+  document.getElementById('bench-info-label').textContent = currentPreset.label;
+  document.getElementById('bench-info-desc').textContent = currentPreset.desc;
+
+  if (currentPreset.key.startsWith('custom_')) {
+    btnDelete.classList.remove('hidden');
+  } else {
+    btnDelete.classList.add('hidden');
+  }
+
+  document.getElementById('input-bench-type').value = currentPreset.key;
+  fillScoreDefaults(currentPreset);
+  fillAblationDefaults(currentPreset);
+}
+
+function saveCustomPreset() {
+  const name = document.getElementById('cp-name').value.trim();
+  if (!name) {
+    alert('请输入预设名称');
+    return;
+  }
+  const lang = document.getElementById('cp-lang').value;
+  const sarif = document.getElementById('cp-sarif').value.trim();
+  const csv = document.getElementById('cp-csv').value.trim();
+  const repo = document.getElementById('cp-repo').value.trim();
+  
+  const newPreset = {
+    key: 'custom_' + Date.now(),
+    label: name,
+    desc: `${lang.toUpperCase()} | 自定义测试集`,
+    icon: '\u{2699}',
+    default_sarif: sarif,
+    default_csv: csv,
+    default_repo: repo,
+    language: lang,
+    score_prefix: 'custom_score',
+  };
+  
+  BENCH_PRESETS.push(newPreset);
+  saveCustomPresetsToStorage();
+  initPresetSelectors(newPreset.key);
+  onPresetChange();
+}
+
+function cancelCustomPreset() {
+  initPresetSelectors(BENCH_PRESETS[0].key);
+  onPresetChange();
+}
+
+function deleteCurrentCustomPreset() {
+  if (!currentPreset || !currentPreset.key.startsWith('custom_')) return;
+  if (!confirm(`确定要删除自定义预设 "${currentPreset.label}" 吗？`)) return;
+  
+  BENCH_PRESETS = BENCH_PRESETS.filter(p => p.key !== currentPreset.key);
+  saveCustomPresetsToStorage();
+  initPresetSelectors(BENCH_PRESETS[0].key);
+  onPresetChange();
+}
+
+function onScoreBenchChange() {
+  const key = document.getElementById('input-bench-type').value;
+  fillScoreDefaults(getPreset(key));
+}
+
+function fillScoreDefaults(p) {
+  document.getElementById('input-sarif-path').value = p.default_sarif;
+  document.getElementById('input-sarif-path').placeholder = p.default_sarif || 'SARIF 文件路径';
+  document.getElementById('input-expected-csv').value = p.default_csv;
+  document.getElementById('score-dialog-title').textContent = `评分 — ${p.label}`;
+}
+
+function fillAblationDefaults(p) {
+  document.getElementById('abl-sarif').value = p.default_sarif;
+  document.getElementById('abl-repo').value = p.default_repo;
+  document.getElementById('abl-csv').value = p.default_csv;
+}
+
+// ---------------------------------------------------------------------------
+// 数据加载与渲染
+// ---------------------------------------------------------------------------
 async function loadScores() {
   try {
     const res = await fetch('/api/benchmark/scores');
@@ -180,21 +435,33 @@ async function loadScores() {
     renderDetailTable();
   } catch(e) {
     document.getElementById('compare-tbody').innerHTML =
-      '<tr><td colspan="11" class="text-center text-red-400 py-6">加载失败</td></tr>';
+      '<tr><td colspan="12" class="text-center text-red-400 py-6">加载失败</td></tr>';
   }
+}
+
+function inferBenchType(filename) {
+  if (!filename) return 'unknown';
+  const f = filename.toLowerCase();
+  if (f.includes('juliet'))   return 'Juliet';
+  if (f.includes('cvebench')) return 'CVE-Bench';
+  if (f.includes('custom'))   return 'Custom';
+  return 'OWASP';
 }
 
 function renderCompareTable() {
   const tbody = document.getElementById('compare-tbody');
   if (allScores.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-gray-600 py-6">暂无评分记录，点击"新建评分"开始</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-gray-600 py-6">暂无评分记录，点击"新建评分"开始</td></tr>';
     return;
   }
   tbody.innerHTML = allScores.map(s => {
     const o = s.overall || {};
-    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    const fname = s._filename || '';
+    const benchType = s.benchmark_type || inferBenchType(fname);
+    const name = fname.replace(/^(benchmark_score_|juliet_score_|cvebench_score_|custom_score_)/, '').replace('.json', '');
     const yClass = o.youden > 0.7 ? 'text-green-400' : o.youden > 0.4 ? 'text-yellow-400' : 'text-red-400';
     return `<tr>
+      <td class="text-xs text-gray-400 whitespace-nowrap">${esc(benchType)}</td>
       <td class="font-medium text-brand-500 whitespace-nowrap">${esc(name)}</td>
       <td>${s.total_findings || 0}</td>
       <td class="text-green-400 font-semibold">${o.tp||0}</td>
@@ -217,11 +484,12 @@ function renderCharts() {
   if (cats.length === 0) return;
 
   const labels = cats.map(c => c.label || c.category);
-  const colors = ['rgba(96,165,250,0.8)','rgba(248,113,113,0.8)','rgba(74,222,128,0.8)','rgba(250,204,21,0.8)','rgba(192,132,252,0.8)'];
+  const colors = ['rgba(96,165,250,0.8)','rgba(248,113,113,0.8)','rgba(74,222,128,0.8)','rgba(250,204,21,0.8)','rgba(192,132,252,0.8)',
+                  'rgba(251,146,60,0.8)','rgba(34,211,238,0.8)','rgba(163,230,53,0.8)'];
 
-  // F1 chart — show all scores for comparison
   const f1Datasets = allScores.map((s, i) => {
-    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    const fname = s._filename || '';
+    const name = fname.replace(/^(benchmark_score_|juliet_score_|cvebench_score_|custom_score_)/, '').replace('.json', '');
     return {
       label: name,
       data: (s.categories || []).map(c => c.f1 || 0),
@@ -237,9 +505,9 @@ function renderCharts() {
     options: chartOpts('F1 Score', 1.1),
   });
 
-  // Youden chart
   const yDatasets = allScores.map((s, i) => {
-    const name = (s._filename || '').replace('benchmark_score_', '').replace('.json', '');
+    const fname = s._filename || '';
+    const name = fname.replace(/^(benchmark_score_|juliet_score_|cvebench_score_|custom_score_)/, '').replace('.json', '');
     return {
       label: name,
       data: (s.categories || []).map(c => c.youden || 0),
@@ -298,13 +566,18 @@ function renderDetailTable() {
   }).join('');
 }
 
+// ---------------------------------------------------------------------------
+// 评分
+// ---------------------------------------------------------------------------
 function showScoreDialog() {
+  onPresetChange();
   document.getElementById('score-dialog').classList.remove('hidden');
 }
 
 async function runScore() {
   const sarifPath = document.getElementById('input-sarif-path').value.trim();
   const expectedCsv = document.getElementById('input-expected-csv').value.trim();
+  const benchType = document.getElementById('input-bench-type').value;
   if (!sarifPath) { alert('请输入 SARIF 文件路径'); return; }
 
   document.getElementById('score-status').textContent = '评分中...';
@@ -312,7 +585,7 @@ async function runScore() {
     const res = await fetch('/api/benchmark/score', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sarif_path: sarifPath, expected_csv: expectedCsv }),
+      body: JSON.stringify({ sarif_path: sarifPath, expected_csv: expectedCsv, benchmark_type: benchType }),
     });
     const data = await res.json();
     if (data.error) {
@@ -339,16 +612,17 @@ function esc(s) {
 // 一键消融实验
 // ---------------------------------------------------------------------------
 const ABL_VARIANTS = [
-  { name:'full',             label:'Full QRSE-X',       icon:'🔬' },
-  { name:'no_agent_r',       label:'w/o Agent-R',       icon:'🚫' },
-  { name:'no_codebrowser',   label:'w/o CodeBrowser',   icon:'📖' },
-  { name:'no_rag',           label:'w/o RAG',           icon:'🗃️' },
-  { name:'no_prompt_tuning', label:'w/o Prompt Tuning', icon:'📝' },
+  { name:'full',             label:'Full QRSE-X',       icon:'\u{1F52C}' },
+  { name:'no_agent_r',       label:'w/o Agent-R',       icon:'\u{1F6AB}' },
+  { name:'no_codebrowser',   label:'w/o CodeBrowser',   icon:'\u{1F4D6}' },
+  { name:'no_rag',           label:'w/o RAG',           icon:'\u{1F5C3}' },
+  { name:'no_prompt_tuning', label:'w/o Prompt Tuning', icon:'\u{1F4DD}' },
 ];
 let ablSuiteId = null;
 let ablEventSource = null;
 
 function showAblationDialog() {
+  onPresetChange();
   document.getElementById('ablation-dialog').classList.remove('hidden');
 }
 
@@ -358,11 +632,13 @@ async function startAblation() {
   btn.disabled = true;
   msg.textContent = '启动中...';
 
+  const preset = getPreset(document.getElementById('bench-selector').value);
   const payload = {
     base_sarif: document.getElementById('abl-sarif').value.trim(),
     repo_dir:   document.getElementById('abl-repo').value.trim(),
     expected_csv: document.getElementById('abl-csv').value.trim(),
-    language:   'java',
+    language:   preset.language,
+    benchmark_type: preset.key,
     workers:    parseInt(document.getElementById('abl-workers').value) || 4,
     batch:      parseInt(document.getElementById('abl-batch').value) || 10,
   };

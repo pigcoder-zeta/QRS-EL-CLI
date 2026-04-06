@@ -1,32 +1,22 @@
 """
-QRSE-X × OWASP Benchmark 评分工具
+QRSE-X 通用 Benchmark 评分工具
 
-将 QRSE-X 输出的 SARIF 文件与 OWASP Benchmark 官方标准答案
-(expectedresults-1.2.csv) 对比，计算：
+支持多种测试集:
+  - OWASP Benchmark v1.2  (benchmark_type="owasp")
+  - Juliet Test Suite      (benchmark_type="juliet")
+  - CVE-Bench              (benchmark_type="cvebench")
+  - 自定义                  (benchmark_type="custom")
+
+将 QRSE-X 输出的 SARIF 文件与标准答案对比，计算：
   - TP / FP / TN / FN
-  - 精确率 (Precision)
-  - 召回率 (Recall)
-  - F1 分数
-  - Youden Index（TPR - FPR，= 0 表示随机猜测，= 1 表示完美）
-  - 综合得分（与 OWASP 官方评分标准一致）
+  - 精确率 (Precision) / 召回率 (Recall) / F1
+  - Youden Index（TPR - FPR）
 
 使用方法：
-  # 单个 SARIF 文件
   python scripts/score_benchmark.py \\
       --sarif data/results/benchmark/results_xxx.sarif \\
-      --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv
-
-  # 目录下所有 SARIF 文件（并行扫描多个漏洞类型后）
-  python scripts/score_benchmark.py \\
-      --sarif-dir data/results/benchmark \\
       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \\
-      --output data/results/benchmark_score.json
-
-OWASP Benchmark expectedresults-1.2.csv 格式：
-  # test name, category, real vulnerability, CWE
-  BenchmarkTest00001,pathtraver,false,22
-  BenchmarkTest00002,sqli,true,89
-  ...
+      --benchmark-type owasp
 """
 
 from __future__ import annotations
@@ -165,19 +155,28 @@ class BenchmarkScore:
 # 解析函数
 # ---------------------------------------------------------------------------
 
-def parse_expected_csv(csv_path: str) -> dict[str, ExpectedResult]:
+def parse_expected_csv(
+    csv_path: str,
+    benchmark_type: str = "owasp",
+) -> dict[str, ExpectedResult]:
     """
-    解析 expectedresults-1.2.csv。
+    解析标准答案文件（根据 benchmark_type 切换解析策略）。
 
-    格式（前几行为注释，以 # 开头）：
+    通用格式 (OWASP / custom):
       # test name, category, real vulnerability, CWE
       BenchmarkTest00001,pathtraver,false,22
+
+    Juliet 格式:
+      文件名本身含 good/bad 标记，或使用通用格式的 manifest.csv
     """
-    results: dict[str, ExpectedResult] = {}
     path = Path(csv_path)
     if not path.exists():
         raise FileNotFoundError(f"标准答案文件不存在: {csv_path}")
 
+    if benchmark_type == "juliet":
+        return _parse_expected_juliet(path)
+
+    results: dict[str, ExpectedResult] = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -185,10 +184,17 @@ def parse_expected_csv(csv_path: str) -> dict[str, ExpectedResult]:
                 continue
             parts = line.split(",")
             if len(parts) < 4:
+                if len(parts) >= 3:
+                    test_name = parts[0].strip()
+                    is_real = parts[-1].strip().lower() in ("true", "1", "yes", "bad")
+                    results[test_name] = ExpectedResult(
+                        test_name=test_name, category="unknown",
+                        is_real=is_real, cwe=0,
+                    )
                 continue
             test_name = parts[0].strip()
             category  = parts[1].strip().lower()
-            is_real   = parts[2].strip().lower() == "true"
+            is_real   = parts[2].strip().lower() in ("true", "1", "yes", "bad")
             try:
                 cwe = int(parts[3].strip())
             except ValueError:
@@ -198,20 +204,81 @@ def parse_expected_csv(csv_path: str) -> dict[str, ExpectedResult]:
                 is_real=is_real, cwe=cwe,
             )
 
-    print(f"[解析] 标准答案: {len(results)} 条用例")
+    print(f"[解析] 标准答案 ({benchmark_type}): {len(results)} 条用例")
     return results
 
 
-def _extract_test_name(file_uri: str) -> Optional[str]:
-    """
-    从文件路径提取 BenchmarkTest 用例名。
+def _parse_expected_juliet(path: Path) -> dict[str, ExpectedResult]:
+    """解析 Juliet manifest（支持通用 CSV 格式或按行文件名推断）。"""
+    results: dict[str, ExpectedResult] = {}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            if len(parts) >= 4:
+                test_name = parts[0].strip()
+                category  = parts[1].strip().lower()
+                is_real   = parts[2].strip().lower() in ("true", "1", "yes", "bad")
+                try:
+                    cwe = int(parts[3].strip())
+                except ValueError:
+                    cwe = 0
+                results[test_name] = ExpectedResult(
+                    test_name=test_name, category=category,
+                    is_real=is_real, cwe=cwe,
+                )
+            elif len(parts) >= 1:
+                fname = parts[0].strip()
+                is_bad = "__bad" in fname.lower() or "_bad" in fname.lower()
+                is_good = "__good" in fname.lower() or "_good" in fname.lower()
+                is_real = is_bad and not is_good
+                cwe_m = re.search(r"CWE(\d+)", fname, re.IGNORECASE)
+                cwe = int(cwe_m.group(1)) if cwe_m else 0
+                cat = f"cwe{cwe}" if cwe else "unknown"
+                results[fname] = ExpectedResult(
+                    test_name=fname, category=cat,
+                    is_real=is_real, cwe=cwe,
+                )
 
-    路径示例：
-      src/main/java/org/owasp/benchmark/testcode/BenchmarkTest00001.java
-      file:///...BenchmarkTest00001.java
-    """
+    print(f"[解析] 标准答案 (juliet): {len(results)} 条用例")
+    return results
+
+
+def _extract_test_name(file_uri: str, benchmark_type: str = "owasp") -> Optional[str]:
+    """从文件路径提取测试用例名（根据 benchmark_type 切换策略）。"""
+    if benchmark_type == "juliet":
+        return _extract_test_name_juliet(file_uri)
+    if benchmark_type == "cvebench":
+        return _extract_test_name_cvebench(file_uri)
+    if benchmark_type == "custom":
+        return _extract_test_name_generic(file_uri)
     m = re.search(r"(BenchmarkTest\d+)", file_uri, re.IGNORECASE)
     return m.group(1) if m else None
+
+
+def _extract_test_name_juliet(file_uri: str) -> Optional[str]:
+    """Juliet: CWE<id>_<VulnType>__<variant>"""
+    m = re.search(r"(CWE\d+_[A-Za-z0-9_]+?)\.(?:java|c|cpp)$", file_uri, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"(CWE\d+[^\\/]+)", file_uri, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _extract_test_name_cvebench(file_uri: str) -> Optional[str]:
+    """CVE-Bench: CVE-YYYY-NNNNN"""
+    m = re.search(r"(CVE-\d{4}-\d+)", file_uri, re.IGNORECASE)
+    return m.group(1) if m else _extract_test_name_generic(file_uri)
+
+
+def _extract_test_name_generic(file_uri: str) -> Optional[str]:
+    """通用：用文件名（不含后缀）作为 test_name。"""
+    uri = file_uri.replace("\\", "/")
+    name = uri.rsplit("/", 1)[-1] if "/" in uri else uri
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return stem if stem else None
 
 
 def _infer_category(rule_id: str, message: str) -> Optional[str]:
@@ -223,8 +290,11 @@ def _infer_category(rule_id: str, message: str) -> Optional[str]:
     return None
 
 
-def parse_sarif_findings(sarif_path: str) -> list[FindingRecord]:
-    """解析单个 SARIF 文件，提取所有 BenchmarkTest 用例的发现。"""
+def parse_sarif_findings(
+    sarif_path: str,
+    benchmark_type: str = "owasp",
+) -> list[FindingRecord]:
+    """解析单个 SARIF 文件，提取测试用例的发现。"""
     path = Path(sarif_path)
     if not path.exists():
         return []
@@ -244,9 +314,9 @@ def parse_sarif_findings(sarif_path: str) -> list[FindingRecord]:
             uri  = pl.get("artifactLocation", {}).get("uri", "")
             line = pl.get("region", {}).get("startLine", 0)
 
-            test_name = _extract_test_name(uri)
+            test_name = _extract_test_name(uri, benchmark_type=benchmark_type)
             if not test_name:
-                continue  # 跳过非 Benchmark 文件
+                continue
 
             category = _infer_category(rule_id, message)
             if not category:
@@ -264,25 +334,28 @@ def parse_sarif_findings(sarif_path: str) -> list[FindingRecord]:
     return findings
 
 
-def load_all_sarif(sarif_dir: Optional[str], sarif_file: Optional[str]) -> tuple[list[FindingRecord], int]:
+def load_all_sarif(
+    sarif_dir: Optional[str],
+    sarif_file: Optional[str],
+    benchmark_type: str = "owasp",
+) -> tuple[list[FindingRecord], int]:
     """加载所有 SARIF 文件，返回发现列表和文件数。"""
     all_findings: list[FindingRecord] = []
     file_count = 0
 
     if sarif_file:
-        findings = parse_sarif_findings(sarif_file)
+        findings = parse_sarif_findings(sarif_file, benchmark_type=benchmark_type)
         all_findings.extend(findings)
         file_count += 1
-        print(f"[解析] {sarif_file}: {len(findings)} 条 Benchmark 发现")
+        print(f"[解析] {sarif_file}: {len(findings)} 条发现")
 
     if sarif_dir:
         for fp in Path(sarif_dir).glob("*.sarif"):
-            findings = parse_sarif_findings(str(fp))
+            findings = parse_sarif_findings(str(fp), benchmark_type=benchmark_type)
             all_findings.extend(findings)
             file_count += 1
-            print(f"[解析] {fp.name}: {len(findings)} 条 Benchmark 发现")
+            print(f"[解析] {fp.name}: {len(findings)} 条发现")
 
-    # 去重（同一 test_name + category，SARIF 可能有多条重复）
     seen: set[tuple[str, str]] = set()
     deduped: list[FindingRecord] = []
     for f in all_findings:
@@ -291,7 +364,7 @@ def load_all_sarif(sarif_dir: Optional[str], sarif_file: Optional[str]) -> tuple
             seen.add(key)
             deduped.append(f)
 
-    print(f"[解析] SARIF 共 {file_count} 个文件，去重后 {len(deduped)} 条 Benchmark 发现")
+    print(f"[解析] SARIF 共 {file_count} 个文件，去重后 {len(deduped)} 条发现")
     return deduped, file_count
 
 
@@ -421,10 +494,15 @@ def print_score_table(score: BenchmarkScore) -> None:
     print()
 
 
-def save_json(score: BenchmarkScore, output_path: str) -> None:
+def save_json(
+    score: BenchmarkScore,
+    output_path: str,
+    benchmark_type: str = "owasp",
+) -> None:
     """将评分结果保存为 JSON。"""
     data = {
         "tool": score.tool_name,
+        "benchmark_type": benchmark_type,
         "sarif_files": score.sarif_files,
         "total_findings": score.total_findings,
         "overall": {
@@ -497,25 +575,21 @@ def dry_run_summary(expected: dict[str, ExpectedResult]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="QRSE-X × OWASP Benchmark 评分工具",
+        description="QRSE-X 通用 Benchmark 评分工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
-  # 查看 Benchmark 标准答案统计（不需要 SARIF）
-  python scripts/score_benchmark.py \\
-      --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \\
-      --dry-run
-
-  # 评分单个 SARIF
+  # OWASP Benchmark
   python scripts/score_benchmark.py \\
       --sarif data/results/benchmark/results_sqli.sarif \\
-      --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv
-
-  # 评分目录下所有 SARIF
-  python scripts/score_benchmark.py \\
-      --sarif-dir data/results/benchmark \\
       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \\
-      --output data/results/benchmark_score.json
+      --benchmark-type owasp
+
+  # Juliet Test Suite
+  python scripts/score_benchmark.py \\
+      --sarif-dir data/results/juliet \\
+      --expected data/benchmark/Juliet/manifest.csv \\
+      --benchmark-type juliet
         """,
     )
     parser.add_argument("--sarif", default=None, metavar="FILE",
@@ -523,15 +597,19 @@ def main() -> None:
     parser.add_argument("--sarif-dir", default=None, metavar="DIR",
                         help="包含多个 .sarif 文件的目录")
     parser.add_argument("--expected", required=True, metavar="CSV",
-                        help="OWASP Benchmark expectedresults-1.2.csv 路径")
+                        help="标准答案文件路径")
     parser.add_argument("--output", default=None, metavar="JSON",
                         help="评分结果 JSON 输出路径（可选）")
+    parser.add_argument("--benchmark-type", default="owasp",
+                        choices=["owasp", "juliet", "cvebench", "custom"],
+                        help="测试集类型 (默认: owasp)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="仅显示 Benchmark 标准答案统计，不解析 SARIF")
+                        help="仅显示标准答案统计，不解析 SARIF")
     args = parser.parse_args()
 
-    # 加载标准答案
-    expected = parse_expected_csv(args.expected)
+    btype = args.benchmark_type
+
+    expected = parse_expected_csv(args.expected, benchmark_type=btype)
 
     if args.dry_run:
         dry_run_summary(expected)
@@ -540,22 +618,19 @@ def main() -> None:
     if not args.sarif and not args.sarif_dir:
         parser.error("必须提供 --sarif 或 --sarif-dir")
 
-    # 加载 SARIF 发现
-    findings, file_count = load_all_sarif(args.sarif_dir, args.sarif)
+    findings, file_count = load_all_sarif(args.sarif_dir, args.sarif, benchmark_type=btype)
 
-    # 计算评分
     score = compute_score(expected, findings)
     score.sarif_files = file_count
 
-    # 打印结果
     print_score_table(score)
 
-    # 保存 JSON
     if args.output:
         save_json(score, args.output)
     else:
-        # 默认保存到 data/results/
-        default_out = "data/results/benchmark_score.json"
+        prefix = {"owasp": "benchmark", "juliet": "juliet",
+                  "cvebench": "cvebench", "custom": "custom"}.get(btype, "benchmark")
+        default_out = f"data/results/{prefix}_score.json"
         save_json(score, default_out)
 
 
