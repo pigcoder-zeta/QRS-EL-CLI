@@ -82,6 +82,7 @@ class PipelineConfig:
     max_retries: int = 3
     cleanup_workspace: bool = True
     enable_agent_r: bool = True
+    enable_agent_t: bool = False
     agent_r_min_confidence: float = 0.6
     enable_agent_s: bool = True
     enable_rule_memory: bool = True
@@ -273,6 +274,52 @@ class Coordinator:
             ", ".join(sorted(frameworks)) if frameworks else "未知",
             state.scan_mode,
         )
+
+    def _phase_triage(self, state: PipelineState) -> None:
+        """Phase 0.5（可选）：Agent-T 代码库分类，自动调整扫描策略。"""
+        if not self.config.enable_agent_t:
+            return
+        if not state.source_dir:
+            return
+
+        try:
+            from src.agents.agent_t import AgentT
+
+            agent_t = AgentT()
+
+            @dataclass
+            class _MiniRecon:
+                primary_language: str = ""
+                frameworks: list = field(default_factory=list)
+                has_android: bool = False
+                has_solidity: bool = False
+                entry_points: list = field(default_factory=list)
+
+            recon = _MiniRecon(
+                primary_language=self.config.language,
+                frameworks=list(state.detected_frameworks or []),
+            )
+
+            profile = agent_t.classify(recon_report=recon, source_dir=state.source_dir)
+
+            if profile.prompt_preset and not self.config.prompt_preset:
+                self.config.prompt_preset = profile.prompt_preset
+                logger.info("[Phase 0.5] Agent-T 设置 prompt_preset=%s", profile.prompt_preset)
+
+            if profile.context_window and profile.context_window != 30:
+                self.config.agent_r_context_lines = profile.context_window
+                self.agent_r.context_lines = profile.context_window
+                logger.info("[Phase 0.5] Agent-T 调整上下文窗口=%d", profile.context_window)
+
+            state.completed_phases.append("triage")
+            logger.info(
+                "[Phase 0.5] Agent-T 完成 | 类型=%s | 置信度=%.0f%% | %s",
+                profile.codebase_type,
+                profile.confidence * 100,
+                profile.reasoning[:80],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Phase 0.5] Agent-T 执行失败（不影响后续流程）: %s", exc)
 
     def _phase_create_database(self, state: PipelineState) -> None:
         """Phase 1：创建 CodeQL 数据库（优先命中缓存）。"""
@@ -786,6 +833,7 @@ class Coordinator:
                 logger.info(
                     "[外部 SARIF] 跳过 Phase 0~3，直接进入 Agent-R 审查: %s", ext
                 )
+                self._phase_triage(state)
                 self._phase_review(state)
                 self._phase_generate_poc(state)
                 self._phase_verify(state)
@@ -793,6 +841,7 @@ class Coordinator:
                 if self.config.github_url:
                     self._phase_clone_repo(state)
 
+                self._phase_triage(state)
                 self._phase_create_database(state)
                 self._phase_generate_query(state)
                 self._phase_analyze(state)

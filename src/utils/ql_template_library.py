@@ -1360,6 +1360,417 @@ select sink, "Path traversal: user-controlled path from $@ flows into file acces
 """,
 )
 
+_CPP_SQL_INJECTION = QLTemplate(
+    key="cpp/sql-injection",
+    language="cpp",
+    vuln_type="sql injection",
+    description="C/C++ SQL 注入（sqlite3_exec / mysql_query 字符串拼接）",
+    code="""\
+/**
+ * @name SQL Injection (C/C++)
+ * @description User-controlled data flows into SQL query without parameterization.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/sql-injection
+ * @tags security external/cwe/cwe-089
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class SqlSink extends DataFlow::Node {
+  SqlSink() {
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("sqlite3_exec") or
+        fc.getTarget().hasName("mysql_query") or
+        fc.getTarget().hasName("mysql_real_query") or
+        fc.getTarget().hasName("PQexec") or
+        fc.getTarget().hasName("PQexecParams")
+      ) and
+      this.asExpr() = fc.getArgument(1)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("getenv") or
+        fc.getTarget().hasName("fgets") or
+        fc.getTarget().hasName("gets") or
+        fc.getTarget().hasName("scanf") or
+        fc.getTarget().hasName("recv")
+      ) and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module SqlConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SqlSink }
+}
+
+module SqlFlow = TaintTracking::Global<SqlConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SqlFlow::flow(source, sink)
+select sink, "SQL injection: user-controlled data from $@ flows into SQL query.", source, "user input"
+""",
+)
+
+_CPP_BUFFER_OVERFLOW = QLTemplate(
+    key="cpp/buffer-overflow",
+    language="cpp",
+    vuln_type="buffer overflow",
+    description="C/C++ 缓冲区溢出（strcpy/strcat/sprintf/gets/memcpy 无边界检查）",
+    code="""\
+/**
+ * @name Buffer Overflow (C/C++)
+ * @description User-controlled data flows into unsafe buffer manipulation functions
+ *              without proper bounds checking.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/buffer-overflow
+ * @tags security external/cwe/cwe-120
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class UnsafeBufferSink extends DataFlow::Node {
+  UnsafeBufferSink() {
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("strcpy") or
+        fc.getTarget().hasName("strcat") or
+        fc.getTarget().hasName("sprintf") or
+        fc.getTarget().hasName("gets") or
+        fc.getTarget().hasName("wcscpy") or
+        fc.getTarget().hasName("wcscat")
+      ) and
+      this.asExpr() = fc.getArgument(1)
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("memcpy") or
+        fc.getTarget().hasName("memmove")
+      ) and
+      this.asExpr() = fc.getArgument(2)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("getenv") or
+        fc.getTarget().hasName("fgets") or
+        fc.getTarget().hasName("gets") or
+        fc.getTarget().hasName("scanf") or
+        fc.getTarget().hasName("recv")
+      ) and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module BofConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof UnsafeBufferSink }
+}
+
+module BofFlow = TaintTracking::Global<BofConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where BofFlow::flow(source, sink)
+select sink, "Buffer overflow: user-controlled data from $@ flows into unsafe buffer operation.", source, "user input"
+""",
+)
+
+_CPP_SSRF = QLTemplate(
+    key="cpp/ssrf",
+    language="cpp",
+    vuln_type="ssrf",
+    description="C/C++ SSRF（libcurl curl_easy_setopt CURLOPT_URL）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (C/C++)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(FunctionCall fc |
+      fc.getTarget().hasName("curl_easy_setopt") and
+      this.asExpr() = fc.getArgument(2)
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("connect") or
+        fc.getTarget().hasName("getaddrinfo")
+      ) and
+      this.asExpr() = fc.getArgument(0)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("getenv") or
+        fc.getTarget().hasName("fgets") or
+        fc.getTarget().hasName("recv")
+      ) and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+_PYTHON_PATH_TRAVERSAL = QLTemplate(
+    key="python/path-traversal",
+    language="python",
+    vuln_type="path traversal",
+    description="Python 路径穿越（open / os.path / shutil）",
+    code="""\
+/**
+ * @name Path Traversal (Python)
+ * @description User-controlled path flows into file access without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id python/path-traversal
+ * @tags security external/cwe/cwe-022
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class PathSink extends DataFlow::Node {
+  PathSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Name).getId() = "open" or
+        c.getFunc().(Attribute).getName() = "read_text" or
+        c.getFunc().(Attribute).getName() = "write_text" or
+        c.getFunc().(Attribute).getName() = "open"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+    or
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "join" or
+        c.getFunc().(Attribute).getName() = "send_file"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module PathConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof PathSink }
+}
+
+module PathFlow = TaintTracking::Global<PathConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where PathFlow::flow(source, sink)
+select sink, "Path traversal: user-controlled path from $@ flows into file access.", source, "user input"
+""",
+)
+
+_PYTHON_XSS = QLTemplate(
+    key="python/xss",
+    language="python",
+    vuln_type="xss",
+    description="Python 反射型/存储型 XSS（直接返回用户输入到 HTML 响应）",
+    code="""\
+/**
+ * @name Cross-Site Scripting (Python)
+ * @description User-controlled data flows into HTTP response without escaping.
+ * @kind problem
+ * @problem.severity error
+ * @id python/xss
+ * @tags security external/cwe/cwe-079
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class XssSink extends DataFlow::Node {
+  XssSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "make_response" or
+        c.getFunc().(Name).getId() = "Markup" or
+        c.getFunc().(Attribute).getName() = "mark_safe" or
+        c.getFunc().(Name).getId() = "HttpResponse"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+    or
+    exists(Call c |
+      c.getFunc().(Attribute).getName() = "format_html" and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module XssConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XssSink }
+}
+
+module XssFlow = TaintTracking::Global<XssConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XssFlow::flow(source, sink)
+select sink, "XSS: user-controlled data from $@ flows into HTTP response without escaping.", source, "user input"
+""",
+)
+
+_PYTHON_SSRF = QLTemplate(
+    key="python/ssrf",
+    language="python",
+    vuln_type="ssrf",
+    description="Python SSRF（requests.get / urllib.request.urlopen）",
+    code="""\
+/**
+ * @name Server-Side Request Forgery (Python)
+ * @description User-controlled URL flows into HTTP request without validation.
+ * @kind problem
+ * @problem.severity error
+ * @id python/ssrf
+ * @tags security external/cwe/cwe-918
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class SsrfSink extends DataFlow::Node {
+  SsrfSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "get" or
+        c.getFunc().(Attribute).getName() = "post" or
+        c.getFunc().(Attribute).getName() = "put" or
+        c.getFunc().(Attribute).getName() = "delete" or
+        c.getFunc().(Attribute).getName() = "request" or
+        c.getFunc().(Attribute).getName() = "urlopen"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module SsrfConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof SsrfSink }
+}
+
+module SsrfFlow = TaintTracking::Global<SsrfConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where SsrfFlow::flow(source, sink)
+select sink, "SSRF: user-controlled URL from $@ flows into HTTP request.", source, "user input"
+""",
+)
+
+_GO_XSS = QLTemplate(
+    key="go/xss",
+    language="go",
+    vuln_type="xss",
+    description="Go XSS（net/http ResponseWriter.Write / template.HTML）",
+    code="""\
+/**
+ * @name Cross-Site Scripting (Go)
+ * @description User-controlled data flows into HTTP response without escaping.
+ * @kind problem
+ * @problem.severity error
+ * @id go/xss
+ * @tags security external/cwe/cwe-079
+ */
+import go
+
+private class XssSink extends DataFlow::Node {
+  XssSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getTarget().(Method).hasQualifiedName("net/http", "ResponseWriter", "Write") or
+        call.getTarget().hasQualifiedName("fmt", "Fprintf") or
+        call.getTarget().hasQualifiedName("fmt", "Fprint")
+      ) and
+      this = call.getArgument(0)
+    )
+    or
+    exists(TypeAssertExpr ta |
+      ta.getTypeExpr().toString() = "template.HTML" and
+      this.asExpr() = ta.getExpr()
+    )
+  }
+}
+
+module XssConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XssSink }
+}
+
+module XssFlow = TaintTracking::Global<XssConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XssFlow::flow(source, sink)
+select sink, "XSS: user-controlled data from $@ flows into HTTP response without escaping.", source, "user input"
+""",
+)
+
 # ---------------------------------------------------------------------------
 # 模板注册表
 # ---------------------------------------------------------------------------
@@ -1400,6 +1811,15 @@ _ALL_TEMPLATES: list[QLTemplate] = [
     # C++
     _CPP_COMMAND_INJECTION,
     _CPP_PATH_TRAVERSAL,
+    _CPP_SQL_INJECTION,
+    _CPP_BUFFER_OVERFLOW,
+    _CPP_SSRF,
+    # Python - 新增
+    _PYTHON_PATH_TRAVERSAL,
+    _PYTHON_XSS,
+    _PYTHON_SSRF,
+    # Go - 新增
+    _GO_XSS,
 ]
 
 # 关键词 → 模板映射（优先精确匹配）
@@ -1448,6 +1868,15 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "command injection":            _PYTHON_COMMAND_INJECTION,
         "os command":                   _PYTHON_COMMAND_INJECTION,
         "rce":                          _PYTHON_COMMAND_INJECTION,
+        "path traversal":              _PYTHON_PATH_TRAVERSAL,
+        "directory traversal":         _PYTHON_PATH_TRAVERSAL,
+        "lfi":                          _PYTHON_PATH_TRAVERSAL,
+        "xss":                          _PYTHON_XSS,
+        "cross-site scripting":        _PYTHON_XSS,
+        "cross site scripting":        _PYTHON_XSS,
+        "ssrf":                         _PYTHON_SSRF,
+        "server-side request forgery":  _PYTHON_SSRF,
+        "server side request forgery":  _PYTHON_SSRF,
     },
     "javascript": {
         "sql injection":                _JS_SQL_INJECTION,
@@ -1476,6 +1905,9 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _GO_SSRF,
         "server-side request forgery":  _GO_SSRF,
         "server side request forgery":  _GO_SSRF,
+        "xss":                          _GO_XSS,
+        "cross-site scripting":        _GO_XSS,
+        "cross site scripting":        _GO_XSS,
     },
     "csharp": {
         "sql injection":                _CSHARP_SQL_INJECTION,
@@ -1498,6 +1930,16 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "path traversal":              _CPP_PATH_TRAVERSAL,
         "directory traversal":         _CPP_PATH_TRAVERSAL,
         "lfi":                          _CPP_PATH_TRAVERSAL,
+        "sql injection":                _CPP_SQL_INJECTION,
+        "sql":                          _CPP_SQL_INJECTION,
+        "sqli":                         _CPP_SQL_INJECTION,
+        "buffer overflow":             _CPP_BUFFER_OVERFLOW,
+        "stack overflow":              _CPP_BUFFER_OVERFLOW,
+        "heap overflow":               _CPP_BUFFER_OVERFLOW,
+        "bof":                          _CPP_BUFFER_OVERFLOW,
+        "ssrf":                         _CPP_SSRF,
+        "server-side request forgery":  _CPP_SSRF,
+        "server side request forgery":  _CPP_SSRF,
     },
 }
 

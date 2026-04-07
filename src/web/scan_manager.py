@@ -119,6 +119,7 @@ class ScanManager:
                 sink_hints=cfg.get("sink_hints"),
                 max_retries=int(cfg.get("max_retries", 3)),
                 enable_agent_r=cfg.get("enable_agent_r", True),
+                enable_agent_t=cfg.get("enable_agent_t", False),
                 enable_agent_s=cfg.get("enable_agent_s", True),
                 enable_agent_e=cfg.get("enable_agent_e", True),
                 agent_e_host=cfg.get("agent_e_host"),

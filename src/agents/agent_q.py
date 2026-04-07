@@ -771,12 +771,42 @@ _DEFAULT_SINK_HINTS: dict[str, str] = {
     "java": (
         "org.springframework.expression.ExpressionParser.parseExpression, "
         "ognl.Ognl.getValue, "
-        "org.mvel2.MVEL.eval"
+        "org.mvel2.MVEL.eval, "
+        "java.lang.Runtime.exec, java.sql.Statement.executeQuery, "
+        "java.io.ObjectInputStream.readObject"
     ),
     "python": (
         "jinja2.Environment.from_string, "
         "jinja2.Template, "
-        "mako.template.Template"
+        "mako.template.Template, "
+        "os.system, subprocess.run, cursor.execute, "
+        "pickle.loads, eval, exec"
+    ),
+    "javascript": (
+        "child_process.exec, child_process.spawn, eval, "
+        "fs.readFile, fs.readFileSync, sequelize.query, "
+        "res.send, res.write, innerHTML, "
+        "axios.get, fetch, http.request"
+    ),
+    "go": (
+        "os/exec.Command, database/sql.DB.Query, database/sql.DB.Exec, "
+        "net/http.Get, net/http.Client.Do, "
+        "os.Open, os.ReadFile, filepath.Join, "
+        "encoding/xml.Decoder.Decode, fmt.Fprintf"
+    ),
+    "cpp": (
+        "system, popen, execl, execvp, "
+        "strcpy, strcat, sprintf, gets, memcpy, memmove, "
+        "malloc, calloc, realloc, free, "
+        "printf, fprintf, fopen, open, "
+        "scanf, sscanf"
+    ),
+    "csharp": (
+        "System.Diagnostics.Process.Start, "
+        "System.Data.SqlClient.SqlCommand.ExecuteReader, "
+        "System.IO.File.ReadAllText, System.IO.File.Open, "
+        "System.Net.Http.HttpClient.GetAsync, "
+        "System.Runtime.Serialization.Formatters.Binary.BinaryFormatter.Deserialize"
     ),
     "kernel": (
         "copy_from_user, __copy_from_user, get_user, __get_user, "

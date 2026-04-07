@@ -32,6 +32,7 @@ class VulnEntry:
     javascript_sinks: tuple[str, ...] = field(default_factory=tuple)
     go_sinks: tuple[str, ...] = field(default_factory=tuple)
     cpp_sinks: tuple[str, ...] = field(default_factory=tuple)  # C/C++ / Kernel Sink 提示
+    csharp_sinks: tuple[str, ...] = field(default_factory=tuple)
     description: str = ""           # 漏洞危害描述
 
 
@@ -110,6 +111,19 @@ VULN_CATALOG: list[VulnEntry] = [
             "knex.raw",
             "connection.query",
         ),
+        go_sinks=(
+            "database/sql.DB#Query",
+            "database/sql.DB#QueryRow",
+            "database/sql.DB#Exec",
+            "gorm.io/gorm.DB#Raw",
+            "gorm.io/gorm.DB#Exec",
+        ),
+        csharp_sinks=(
+            "System.Data.SqlClient.SqlCommand#ExecuteReader",
+            "System.Data.SqlClient.SqlCommand#ExecuteNonQuery",
+            "System.Data.SqlClient.SqlCommand#ExecuteScalar",
+            "Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions#ExecuteSqlRaw",
+        ),
         description="用户可控数据未经参数化直接拼接进 SQL 查询，导致数据泄露或权限提升。",
     ),
 
@@ -145,6 +159,14 @@ VULN_CATALOG: list[VulnEntry] = [
             "os/exec.Command",
             "exec.Command",
         ),
+        cpp_sinks=(
+            "system", "popen", "execl", "execlp", "execle",
+            "execv", "execvp", "execvpe",
+        ),
+        csharp_sinks=(
+            "System.Diagnostics.Process#Start",
+            "System.Diagnostics.ProcessStartInfo#FileName",
+        ),
         description="用户可控数据拼接进操作系统命令，导致远程代码执行。",
     ),
 
@@ -176,6 +198,23 @@ VULN_CATALOG: list[VulnEntry] = [
             "path.join",
             "res.sendFile",
         ),
+        go_sinks=(
+            "os.Open",
+            "os.ReadFile",
+            "filepath.Join",
+            "ioutil.ReadFile",
+            "http.ServeFile",
+        ),
+        cpp_sinks=(
+            "fopen", "open", "ifstream", "ofstream",
+            "realpath", "access",
+        ),
+        csharp_sinks=(
+            "System.IO.File#ReadAllText",
+            "System.IO.File#Open",
+            "System.IO.FileStream#<init>",
+            "System.IO.Path#Combine",
+        ),
         description="用户可控路径未经规范化校验，导致访问限制目录外的文件。",
     ),
 
@@ -204,6 +243,16 @@ VULN_CATALOG: list[VulnEntry] = [
             "element.innerHTML",
             "res.send",
             "res.write",
+        ),
+        go_sinks=(
+            "fmt.Fprintf",
+            "http.ResponseWriter#Write",
+            "template.HTML",
+            "template.JSStr",
+        ),
+        csharp_sinks=(
+            "Microsoft.AspNetCore.Html.HtmlString",
+            "Microsoft.AspNetCore.Mvc.ContentResult#Content",
         ),
         description="用户可控数据未经转义输出到 HTML 页面，导致 XSS 攻击。",
     ),
@@ -237,6 +286,18 @@ VULN_CATALOG: list[VulnEntry] = [
             "https.request",
             "request.get",
         ),
+        go_sinks=(
+            "net/http.Get",
+            "net/http.Post",
+            "net/http.Client#Do",
+            "net/http.NewRequest",
+        ),
+        csharp_sinks=(
+            "System.Net.Http.HttpClient#GetAsync",
+            "System.Net.Http.HttpClient#SendAsync",
+            "System.Net.WebClient#DownloadString",
+            "System.Net.HttpWebRequest#GetResponse",
+        ),
         description="用户可控 URL 未经验证直接发起服务端请求，导致内网探测或数据泄露。",
     ),
 
@@ -266,6 +327,16 @@ VULN_CATALOG: list[VulnEntry] = [
             "unserialize",
             "node-serialize.unserialize",
         ),
+        go_sinks=(
+            "encoding/gob.Decoder#Decode",
+            "encoding/json.Decoder#Decode",
+            "encoding/xml.Decoder#Decode",
+        ),
+        csharp_sinks=(
+            "System.Runtime.Serialization.Formatters.Binary.BinaryFormatter#Deserialize",
+            "System.Xml.Serialization.XmlSerializer#Deserialize",
+            "Newtonsoft.Json.JsonConvert#DeserializeObject",
+        ),
         description="对不可信数据执行反序列化操作，导致任意代码执行。",
     ),
 
@@ -287,6 +358,15 @@ VULN_CATALOG: list[VulnEntry] = [
             "xml.etree.ElementTree.fromstring",
             "lxml.etree.parse",
             "xml.dom.minidom.parse",
+        ),
+        javascript_sinks=(
+            "libxmljs.parseXml",
+            "xml2js.parseString",
+            "fast-xml-parser.parse",
+        ),
+        go_sinks=(
+            "encoding/xml.Decoder#Decode",
+            "encoding/xml.Unmarshal",
         ),
         description="XML 解析器未禁用外部实体，导致文件读取或 SSRF。",
     ),
@@ -448,6 +528,11 @@ VULN_CATALOG: list[VulnEntry] = [
         python_sinks=(),
         javascript_sinks=(),
         go_sinks=(),
+        cpp_sinks=(
+            "strcpy", "strcat", "sprintf", "gets",
+            "memcpy", "memmove", "strncpy", "strncat",
+            "scanf", "sscanf", "vsprintf",
+        ),
         description="未检查输入大小直接复制到固定大小缓冲区，导致内存破坏和代码执行。查询模式：pattern-match (C/C++)",
     ),
 
@@ -460,6 +545,10 @@ VULN_CATALOG: list[VulnEntry] = [
         keywords=("use after free", "uaf", "dangling pointer", "double free", "memory corruption"),
         java_sinks=(),
         python_sinks=(),
+        cpp_sinks=(
+            "free", "realloc", "delete", "delete[]",
+            "malloc", "calloc",
+        ),
         description="释放内存后继续使用指向该内存的指针，导致任意代码执行。查询模式：local-flow (C/C++)",
     ),
 
@@ -473,6 +562,10 @@ VULN_CATALOG: list[VulnEntry] = [
                   "signed overflow", "arithmetic overflow"),
         java_sinks=(),
         python_sinks=(),
+        cpp_sinks=(
+            "malloc", "calloc", "realloc", "alloca",
+            "new", "new[]",
+        ),
         description="整数运算溢出导致缓冲区分配不足或逻辑错误。查询模式：local-flow (C/C++)",
     ),
 
@@ -490,6 +583,11 @@ VULN_CATALOG: list[VulnEntry] = [
         ),
         python_sinks=(
             "str.format", "f-string",
+        ),
+        cpp_sinks=(
+            "printf", "fprintf", "sprintf", "snprintf",
+            "vprintf", "vfprintf", "vsprintf", "vsnprintf",
+            "syslog", "wprintf",
         ),
         description="用户可控数据作为格式化字符串，在 C/C++ 中可导致内存读写。查询模式：taint (C/C++)",
     ),
@@ -509,6 +607,18 @@ VULN_CATALOG: list[VulnEntry] = [
         ),
         python_sinks=(
             "open", "socket.socket",
+        ),
+        javascript_sinks=(
+            "fs.createReadStream",
+            "net.createConnection",
+        ),
+        go_sinks=(
+            "os.Open", "os.Create",
+            "net.Dial", "sql.Open",
+        ),
+        cpp_sinks=(
+            "fopen", "open", "socket", "malloc",
+            "new", "mmap",
         ),
         description="打开的资源（文件/连接/Socket）未在所有路径上正确关闭。查询模式：pattern-match",
     ),
@@ -531,6 +641,10 @@ VULN_CATALOG: list[VulnEntry] = [
         ),
         go_sinks=(
             "sync.Map", "map access",
+        ),
+        cpp_sinks=(
+            "pthread_mutex_lock", "pthread_mutex_unlock",
+            "access", "stat", "open",
         ),
         description="检查与使用之间的时间窗口被利用，导致权限绕过或数据不一致。查询模式：pattern-match",
     ),
@@ -828,6 +942,12 @@ VULN_CATALOG: list[VulnEntry] = [
             "logger.info",
             "logger.warning",
         ),
+        javascript_sinks=(
+            "console.log",
+            "console.error",
+            "winston.log",
+            "bunyan.info",
+        ),
         description="用户可控数据写入日志，导致日志伪造或 CRLF 注入。",
     ),
 
@@ -900,15 +1020,15 @@ def get_sink_hints(vuln_type: str, language: str) -> str:
 
     Args:
         vuln_type: 漏洞类型名称。
-        language: 目标语言（java / python / javascript / go）。
+        language: 目标语言（java / python / javascript / go / cpp / csharp）。
 
     Returns:
         Sink 方法列表字符串，供 Agent-Q Prompt 使用。
-        未匹配时返回通用提示。
+        当目录中无该语言的 sink 时返回空字符串，让调用方回退到语言级默认 sink。
     """
     entry = find(vuln_type)
     if entry is None:
-        return "（未在漏洞目录中找到，请根据漏洞类型推断常见 Sink 方法）"
+        return ""
 
     lang = language.lower()
     sinks: tuple[str, ...] = ()
@@ -922,9 +1042,11 @@ def get_sink_hints(vuln_type: str, language: str) -> str:
         sinks = entry.go_sinks
     elif lang in ("cpp", "c", "kernel"):
         sinks = entry.cpp_sinks
+    elif lang in ("csharp", "cs"):
+        sinks = entry.csharp_sinks
 
     if not sinks:
-        return f"（{entry.name} 暂无 {language} Sink 列表，请根据漏洞类型推断）"
+        return ""
 
     lines = "\n".join(f"  - {s}" for s in sinks)
     return f"CWE: {entry.cwe}（{entry.cwe_desc}）\n已知 Sink 方法：\n{lines}"

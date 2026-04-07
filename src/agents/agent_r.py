@@ -675,7 +675,7 @@ class AgentR:
     def _invoke_llm(
         self,
         finding: SarifFinding,
-        language: str = "java",
+        language: str = "generic",
         prompt_preset: str = "",
     ) -> dict[str, Any]:
         """
@@ -743,7 +743,7 @@ class AgentR:
     def _invoke_llm_batch(
         self,
         findings_with_context: list[SarifFinding],
-        language: str = "java",
+        language: str = "generic",
         prompt_preset: str = "",
     ) -> list[dict[str, Any]]:
         """对一批 findings 执行单次 LLM 调用，返回审查结果数组。"""
@@ -1008,7 +1008,7 @@ class AgentR:
         self,
         sarif_path: str,
         repo_root: str,
-        language: str = "java",
+        language: str = "generic",
         parallel_workers: int = 1,
         batch_size: int = 1,
         checkpoint_done: dict | None = None,

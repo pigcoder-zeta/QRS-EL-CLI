@@ -459,36 +459,47 @@ function escapeHtml(s) {
 function applyPreset(name) {
   document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('selected'));
   event.currentTarget.classList.add('selected');
+
+  let lang = null;
+  if (name.startsWith('java') || name === 'benchmark') lang = 'java';
+  else if (name === 'python-ssti') lang = 'python';
+  else if (name === 'kernel') lang = 'cpp';
+  else if (name === 'contract') lang = 'solidity';
+
+  if (lang) {
+    document.getElementById('input-language').value = lang;
+    renderVulnTypes(lang);
+  }
+
   const vulnCbs = document.querySelectorAll('.vuln-cb');
-  vulnCbs.forEach(cb => cb.checked = false);
+  if (name !== 'quick') vulnCbs.forEach(cb => cb.checked = false);
 
   if (name === 'java-all') {
-    document.getElementById('input-language').value = 'java';
-    vulnCbs.forEach(cb => cb.checked = true);
+    vulnCbs.forEach(cb => {
+      const val = cb.value.toLowerCase();
+      // 排除 Android (移动端) 和 供应链 (Dependency/Package) 以及可能的硬编码 (Hardcoded) 如果用户打字笔误
+      if (!val.includes('android') && !val.includes('dependency') && !val.includes('package') && !val.includes('hardcoded')) {
+        cb.checked = true;
+      }
+    });
     document.getElementById('input-workers').value = '5';
   } else if (name === 'java-injection') {
-    document.getElementById('input-language').value = 'java';
     const targets = ['sql injection','command injection','el injection','ognl injection'];
     vulnCbs.forEach(cb => { if (targets.some(t => cb.value.toLowerCase().includes(t.split(' ')[0]))) cb.checked = true; });
   } else if (name === 'python-ssti') {
-    document.getElementById('input-language').value = 'python';
     vulnCbs.forEach(cb => { if (cb.value.toLowerCase().includes('ssti') || cb.value.toLowerCase().includes('template')) cb.checked = true; });
   } else if (name === 'kernel') {
-    document.getElementById('input-language').value = 'cpp';
     const kernelKeys = ['kernel uaf','kernel oob','kernel race','kernel privilege','kernel null','kernel integer','kernel information','kernel double'];
     vulnCbs.forEach(cb => { if (kernelKeys.some(k => cb.value.toLowerCase().includes(k.split(' ')[0]) && cb.value.toLowerCase().includes(k.split(' ')[1]))) cb.checked = true; });
     document.getElementById('input-workers').value = '3';
   } else if (name === 'contract') {
-    document.getElementById('input-language').value = 'solidity';
     vulnCbs.forEach(cb => { if (['reentrancy','overflow','access control','integer'].some(k => cb.value.toLowerCase().includes(k))) cb.checked = true; });
   } else if (name === 'quick') {
     document.getElementById('toggle-agent-s').classList.remove('active');
     document.getElementById('toggle-agent-e').classList.remove('active');
     document.getElementById('toggle-no-build').classList.add('active');
   } else if (name === 'benchmark') {
-    document.getElementById('input-language').value = 'java';
-    renderVulnTypes('java');
-    setTimeout(() => document.querySelectorAll('.vuln-cb').forEach(cb => cb.checked = true), 100);
+    vulnCbs.forEach(cb => cb.checked = true);
     document.getElementById('input-workers').value = '5';
     document.getElementById('toggle-no-build').classList.add('active');
     toggleSource('local');
