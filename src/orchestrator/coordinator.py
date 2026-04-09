@@ -159,6 +159,27 @@ class PipelineState:
     # Checkpoint 持久化
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _serialize_dataclass(obj: object) -> dict:
+        """将 dataclass 实例递归序列化为 JSON-safe 字典。"""
+        from dataclasses import asdict, fields
+        import enum
+        if hasattr(obj, "__dataclass_fields__"):
+            result = {}
+            for f in fields(obj):
+                val = getattr(obj, f.name)
+                result[f.name] = PipelineState._serialize_dataclass(val)
+            return result
+        if isinstance(obj, enum.Enum):
+            return obj.value
+        if isinstance(obj, list):
+            return [PipelineState._serialize_dataclass(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: PipelineState._serialize_dataclass(v) for k, v in obj.items()}
+        if isinstance(obj, set):
+            return list(obj)
+        return obj
+
     def save_checkpoint(self, checkpoint_dir: str = "data/checkpoints") -> str:
         """将当前状态序列化到 JSON 文件，支持断点续跑。"""
         import json as _json
@@ -182,6 +203,9 @@ class PipelineState:
             "patch_commit": self.patch_commit,
             "hotspot_functions": self.hotspot_functions,
             "scan_mode": self.scan_mode,
+            "review_results": [self._serialize_dataclass(r) for r in self.review_results],
+            "poc_results": [self._serialize_dataclass(p) for p in self.poc_results],
+            "verification_results": [self._serialize_dataclass(v) for v in self.verification_results],
         }
         path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.debug("[Checkpoint] 已保存: %s", path)
@@ -192,7 +216,11 @@ class PipelineState:
         """从 JSON 文件恢复 Pipeline 状态。"""
         import json as _json
 
-        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        try:
+            data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as exc:
+            raise RuntimeError(f"无法加载检查点文件: {path}") from exc
+
         state = cls(
             run_id=data["run_id"],
             vuln_type=data.get("vuln_type", ""),
@@ -211,6 +239,66 @@ class PipelineState:
         state.patch_commit = data.get("patch_commit", "")
         state.hotspot_functions = data.get("hotspot_functions", {})
         state.scan_mode = data.get("scan_mode", "full")
+
+        try:
+            from src.agents.agent_r import ReviewResult as _RR, SarifFinding as _SF, VulnStatus as _VS
+            for rd in data.get("review_results", []):
+                finding_data = rd.get("finding", {})
+                finding = _SF(
+                    rule_id=finding_data.get("rule_id", ""),
+                    message=finding_data.get("message", ""),
+                    file_uri=finding_data.get("file_uri", ""),
+                    start_line=finding_data.get("start_line", 0),
+                    code_context=finding_data.get("code_context", ""),
+                    additional_locations=finding_data.get("additional_locations", []),
+                )
+                status_str = rd.get("status", "UNCERTAIN")
+                try:
+                    status = _VS(status_str)
+                except ValueError:
+                    status = _VS.UNCERTAIN
+                rr = _RR(
+                    finding=finding,
+                    status=status,
+                    confidence=rd.get("confidence", 0.0),
+                    engine_detected=rd.get("engine_detected", ""),
+                    reasoning=rd.get("reasoning", ""),
+                    sink_method=rd.get("sink_method", ""),
+                )
+                state.review_results.append(rr)
+        except Exception as exc:
+            logger.warning("[Checkpoint] review_results 恢复失败: %s", exc)
+
+        try:
+            from src.agents.agent_s import PoCResult as _PR
+            for pd in data.get("poc_results", []):
+                poc = _PR(
+                    finding=None,
+                    http_trigger=pd.get("http_trigger", {}),
+                    payloads=pd.get("payloads", []),
+                    raw_llm_output=pd.get("raw_llm_output", ""),
+                )
+                state.poc_results.append(poc)
+        except Exception as exc:
+            logger.warning("[Checkpoint] poc_results 恢复失败: %s", exc)
+
+        try:
+            from src.agents.agent_e import VerificationResult as _VR, VerificationStatus as _VSt
+            for vd in data.get("verification_results", []):
+                status_str = vd.get("status", "UNCONFIRMED")
+                try:
+                    status = _VSt(status_str)
+                except ValueError:
+                    status = _VSt.UNCONFIRMED
+                vr = _VR(
+                    status=status,
+                    confidence=vd.get("confidence", 0.0),
+                    reason=vd.get("reason", ""),
+                )
+                state.verification_results.append(vr)
+        except Exception as exc:
+            logger.warning("[Checkpoint] verification_results 恢复失败: %s", exc)
+
         logger.info("[Checkpoint] 已恢复: %s (已完成阶段: %s)", path, state.completed_phases)
         return state
 
@@ -564,7 +652,7 @@ class Coordinator:
             hits = self.rule_memory.search(
                 language=self.config.language,
                 vuln_type=self.config.vuln_type,
-                sink_hint=self.config.sink_hints or "",
+                sink_hint=effective_sink_hints,
                 top_k=2,
             )
             for record, score in hits:
@@ -629,8 +717,19 @@ class Coordinator:
         state.completed_phases.append("analyze")
         logger.info("[Phase 3] 扫描完成: %s", sarif_path)
 
-        # ── Phase 3.5：规则归档（携带 SARIF 漏洞链路上下文写入 RAG 记忆库）────
-        if self.rule_memory and state.query_path:
+        # ── Phase 3.5：规则归档（仅在 SARIF 有真实发现时写入 RAG 记忆库）────
+        _has_findings = False
+        if sarif_path and Path(sarif_path).exists():
+            try:
+                import json as _json_check
+                _sarif_data = _json_check.loads(Path(sarif_path).read_text(encoding="utf-8"))
+                for run in _sarif_data.get("runs", []):
+                    if run.get("results"):
+                        _has_findings = True
+                        break
+            except Exception:
+                pass
+        if self.rule_memory and state.query_path and _has_findings:
             try:
                 from src.utils.vuln_catalog import find as _vuln_find
                 entry = _vuln_find(self.config.vuln_type)

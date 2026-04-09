@@ -80,13 +80,13 @@ _CONFIRM_PATTERNS: dict[str, list[str]] = {
     "mako": [r"uid=\d+\(", r"root:x:0:0:", r"\b49\b"],
     "ssti": [r"\b49\b", r"uid=\d+\(", r"root:x:0:0:"],
     "sql injection": [
-        r"(syntax error|sql syntax|ORA-\d+|mysql_fetch|pg_query)",
-        r"(root|admin|password)\s*:\s*\$",
-        r"information_schema",
+        r"(You have an error in your SQL syntax|SQL syntax.*?error|ORA-\d{4,5}:|mysql_fetch_\w+\(\)|pg_query\(\).*?ERROR)",
+        r"(SQLSTATE\[\w+\]|PDOException|java\.sql\.SQLException|sqlite3\.OperationalError)",
+        r"(information_schema\.\w+|UNION\s+SELECT\s+.+FROM\s+\w+)",
     ],
     "sqli": [
-        r"(syntax error|sql|ORA-\d+)",
-        r"information_schema",
+        r"(SQL syntax.*?error|ORA-\d{4,5}:|SQLSTATE\[)",
+        r"information_schema\.\w+",
     ],
     "path traversal": [
         r"root:x:0:0:",        # /etc/passwd
@@ -273,6 +273,7 @@ class AgentE(BaseAgent):
         self.enable_docker = enable_docker
         self.cleanup_image = cleanup_image
         self._docker      = DockerManager()
+        self._image_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 主入口
@@ -363,17 +364,24 @@ class AgentE(BaseAgent):
                 reason="仓库中未找到 Dockerfile 或 docker-compose.yml，跳过 Docker 验证。",
             )
 
-        image_tag = f"qrs-el-target-{id(self)}"
+        cached_tag = self._image_cache.get(repo_path)
+        if cached_tag:
+            image_tag = cached_tag
+            need_build = False
+        else:
+            image_tag = f"qrs-el-target-{id(self)}-{hash(repo_path) & 0xFFFF:04x}"
+            need_build = True
+
         container: Optional[ContainerInfo] = None
         try:
-            # 构建镜像
-            if not self._docker.build_image(probe, image_tag):
-                return VerificationResult(
-                    status=VerificationStatus.SKIPPED,
-                    reason="Docker 镜像构建失败，可能需要特定构建环境。",
-                )
+            if need_build:
+                if not self._docker.build_image(probe, image_tag):
+                    return VerificationResult(
+                        status=VerificationStatus.SKIPPED,
+                        reason="Docker 镜像构建失败，可能需要特定构建环境。",
+                    )
+                self._image_cache[repo_path] = image_tag
 
-            # 启动容器
             container = self._docker.start_container(
                 image_tag=image_tag,
                 container_port=probe.expose_port,
@@ -392,7 +400,7 @@ class AgentE(BaseAgent):
         finally:
             if container:
                 self._docker.stop_container(container.container_id)
-            if self.cleanup_image:
+            if self.cleanup_image and not self._image_cache.get(repo_path):
                 self._docker.remove_image(image_tag)
 
     # ------------------------------------------------------------------
@@ -437,14 +445,23 @@ class AgentE(BaseAgent):
             reason="PoC 已发送，但响应中未观察到明确的漏洞触发特征。",
         )
 
+        content_type = trigger.get("content_type", "form")
+        extra_headers = trigger.get("headers", {})
+        cookies = trigger.get("cookies", {})
+
         for payload in poc.payloads:
-            # 构造请求参数
             if method == "GET":
                 params = {param: payload}
-                data   = None
+                data = None
+                json_body = None
+            elif content_type == "json":
+                params = None
+                data = None
+                json_body = {param: payload}
             else:
                 params = None
-                data   = {param: payload}
+                data = {param: payload}
+                json_body = None
 
             url = base_url.rstrip("/") + "/" + path.lstrip("/")
             req_summary = f"{method} {url} [{param}={payload[:40]}...]"
@@ -455,6 +472,9 @@ class AgentE(BaseAgent):
                 path=path,
                 params=params,
                 data=data,
+                json_body=json_body,
+                headers=extra_headers or None,
+                cookies=cookies or None,
             )
 
             snippet = response_body[:500]

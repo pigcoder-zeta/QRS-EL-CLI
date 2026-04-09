@@ -252,7 +252,7 @@ _POC_TEMPLATE = """\
 - 分析说明   : {reasoning}
 
 【源码上下文】
-```java
+```{lang_tag}
 {code_context}
 ```
 
@@ -263,19 +263,39 @@ _POC_TEMPLATE = """\
 重点推断：触发漏洞需要调用哪个 HTTP 接口、参数名是什么、Payload 如何构造。
 """
 
+_LANG_TAG_MAP: dict[str, str] = {
+    "java": "java",
+    "python": "python",
+    "javascript": "javascript",
+    "go": "go",
+    "csharp": "csharp",
+    "cpp": "cpp",
+    "c": "c",
+    "solidity": "solidity",
+    "ruby": "ruby",
+    "php": "php",
+}
+
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
 
 
 def _match_payloads(engine: str) -> list[str]:
-    """根据引擎名称匹配内置 Payload 列表（模糊匹配）。"""
+    """根据引擎名称匹配内置 Payload 列表（评分排序匹配）。"""
     engine_lower = engine.lower()
+    scored: list[tuple[int, str, list[str]]] = []
     for key, payloads in _PAYLOAD_STRATEGIES.items():
-        if key in engine_lower or engine_lower in key:
-            return payloads
-    # 降级：返回 SpEL 载荷（最常见）
-    return _PAYLOAD_STRATEGIES["spring el"]
+        if key == engine_lower:
+            scored.append((100, key, payloads))
+        elif key in engine_lower:
+            scored.append((50 + len(key), key, payloads))
+        elif engine_lower in key:
+            scored.append((30 + len(engine_lower), key, payloads))
+    if scored:
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][2]
+    return _PAYLOAD_STRATEGIES.get("spring el", [])
 
 
 def _parse_poc_json(raw: str) -> dict:
@@ -311,6 +331,29 @@ class AgentS(BaseAgent):
     def _invoke_llm(self, finding: ReviewResult, payloads: list[str]) -> dict:
         """调用 LLM 生成定制化 PoC。"""
         payload_text = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(payloads))
+        lang_tag = _LANG_TAG_MAP.get(
+            getattr(finding, "language", "java"), "java"
+        )
+        uri = finding.finding.file_uri.lower()
+        if uri.endswith(".py"):
+            lang_tag = "python"
+        elif uri.endswith((".js", ".ts")):
+            lang_tag = "javascript"
+        elif uri.endswith(".go"):
+            lang_tag = "go"
+        elif uri.endswith((".cs",)):
+            lang_tag = "csharp"
+        elif uri.endswith((".c", ".h")):
+            lang_tag = "c"
+        elif uri.endswith((".cpp", ".cc", ".cxx", ".hpp")):
+            lang_tag = "cpp"
+        elif uri.endswith(".sol"):
+            lang_tag = "solidity"
+        elif uri.endswith(".rb"):
+            lang_tag = "ruby"
+        elif uri.endswith(".php"):
+            lang_tag = "php"
+
         human_msg = _POC_TEMPLATE.format(
             engine=finding.engine_detected,
             sink_method=finding.sink_method or finding.finding.message[:80],
@@ -319,6 +362,7 @@ class AgentS(BaseAgent):
             reasoning=finding.reasoning,
             code_context=finding.finding.code_context or "（源码上下文不可用）",
             payloads=payload_text,
+            lang_tag=lang_tag,
         )
         chain = self.llm | self._parser
         raw = chain.invoke([
@@ -472,12 +516,17 @@ class AgentS(BaseAgent):
         )
         return result
 
-    def generate_all(self, findings: list[ReviewResult]) -> list[PoCResult]:
+    def generate_all(
+        self,
+        findings: list[ReviewResult],
+        max_workers: int = 3,
+    ) -> list[PoCResult]:
         """
-        批量为所有确认漏洞生成 PoC。
+        批量为所有确认漏洞并行生成 PoC。
 
         Args:
             findings: Agent-R 返回的 VULNERABLE 发现列表。
+            max_workers: 并行线程数。
 
         Returns:
             PoCResult 列表。
@@ -486,17 +535,29 @@ class AgentS(BaseAgent):
             logger.info("[Agent-S] 无确认漏洞，跳过 PoC 生成。")
             return []
 
-        logger.info("[Agent-S] 开始为 %d 处漏洞生成 PoC...", len(findings))
+        logger.info("[Agent-S] 开始为 %d 处漏洞并行生成 PoC (workers=%d)...", len(findings), max_workers)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         results: list[PoCResult] = []
-        for finding in findings:
+
+        def _gen(f: ReviewResult) -> PoCResult | None:
             try:
-                poc = self.generate_poc(finding)
-                results.append(poc)
+                return self.generate_poc(f)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[Agent-S] PoC 生成失败 (%s:%d): %s",
-                    finding.finding.file_uri,
-                    finding.finding.start_line,
+                    f.finding.file_uri,
+                    f.finding.start_line,
                     exc,
                 )
+                return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_gen, f): f for f in findings}
+            for future in as_completed(futures):
+                poc = future.result()
+                if poc is not None:
+                    results.append(poc)
+
         return results

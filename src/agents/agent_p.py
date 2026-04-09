@@ -559,8 +559,13 @@ class AgentP(BaseAgent):
                 getattr(codebase_profile, "recommended_vuln_types", [])
             )
 
+        primary_lang = getattr(recon_report, "primary_language", "").lower()
         catalog_lines = []
         for entry in VULN_CATALOG:
+            if primary_lang and hasattr(entry, f"{primary_lang}_sinks"):
+                if not getattr(entry, f"{primary_lang}_sinks", ()):
+                    if entry.category == "injection":
+                        continue
             marker = " [推荐]" if entry.name in recommended_types else ""
             catalog_lines.append(
                 f"- {entry.name} ({entry.cwe}): 分类={entry.category}, "
@@ -621,7 +626,7 @@ class AgentP(BaseAgent):
             tasks=tasks,
             parallel_workers=data.get("parallel_workers", 3),
             quality_threshold=data.get("quality_threshold", 0.6),
-            max_rounds=2,
+            max_rounds=data.get("max_rounds", 2),
             reasoning=data.get("reasoning", ""),
         )
 
@@ -663,9 +668,7 @@ class AgentP(BaseAgent):
         priority = 1
         for entry in VULN_CATALOG:
             if entry.category in target_cats:
-                has_sinks = bool(
-                    getattr(entry, f"{lang}_sinks", ()) if lang != "cpp" else entry.java_sinks
-                )
+                has_sinks = bool(getattr(entry, f"{lang}_sinks", ()))
                 if has_sinks or entry.category != "injection":
                     tasks.append(ScanTask(
                         vuln_type=entry.name,
@@ -727,6 +730,8 @@ class AgentP(BaseAgent):
         total_findings = 0
         confirmed = 0
         high_conf = 0
+        safe_count = 0
+        uncertain_count = 0
         task_summaries = []
 
         for state in completed_states:
@@ -741,10 +746,18 @@ class AgentP(BaseAgent):
                 for r in state.review_results:
                     if hasattr(r, "confidence") and r.confidence >= 0.8:
                         high_conf += 1
+                    status_val = getattr(r, "status", None)
+                    if status_val is not None:
+                        status_name = status_val.value if hasattr(status_val, "value") else str(status_val)
+                        if status_name.upper() == "SAFE":
+                            safe_count += 1
+                        elif status_name.upper() == "UNCERTAIN":
+                            uncertain_count += 1
 
             task_summaries.append(
                 f"- {state.vuln_type}: "
                 f"findings={n_findings}, confirmed={n_vuln}, poc_verified={n_poc}, "
+                f"safe={safe_count}, uncertain={uncertain_count}, "
                 f"error={state.error or 'None'}"
             )
 
@@ -755,7 +768,7 @@ class AgentP(BaseAgent):
                     task.confirmed_count = n_vuln
 
         fp_rate = (
-            (total_findings - confirmed) / total_findings
+            safe_count / total_findings
             if total_findings > 0 else 0.0
         )
         done_count = sum(1 for t in scan_plan.tasks if t.status == "done")

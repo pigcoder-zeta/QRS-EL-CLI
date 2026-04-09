@@ -630,7 +630,13 @@ class RuleMemory:
             query_parts.append(f"Sink: {sink_hint}")
         query_text = "\n".join(query_parts)
 
-        where = {"language": language.lower()} if self._backend.name == "chromadb" else None
+        if self._backend.name == "chromadb":
+            where_clauses = [{"language": language.lower()}]
+            if vuln_type:
+                where_clauses.append({"vuln_type": vuln_type.lower()})
+            where = {"$and": where_clauses} if len(where_clauses) > 1 else where_clauses[0]
+        else:
+            where = None
         raw = self._backend.query(query_text, n_results=top_k * 5, where=where)
 
         results = []

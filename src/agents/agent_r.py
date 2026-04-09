@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -75,6 +76,11 @@ class SarifFinding:
     file_uri: str           # 相对于仓库根目录的文件路径
     start_line: int
     code_context: str = ""  # 填充后的源码上下文片段
+    additional_locations: list = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.additional_locations is None:
+            self.additional_locations = []
 
 
 @dataclass
@@ -523,15 +529,48 @@ def _parse_sarif(sarif_path: str) -> list[SarifFinding]:
             uri = pl.get("artifactLocation", {}).get("uri", "")
             line = pl.get("region", {}).get("startLine", 0)
 
+            extra_locs: list[dict[str, Any]] = []
+            for loc in locs[1:]:
+                epl = loc.get("physicalLocation", {})
+                extra_locs.append({
+                    "uri": epl.get("artifactLocation", {}).get("uri", ""),
+                    "startLine": epl.get("region", {}).get("startLine", 0),
+                })
+            for rl in result.get("relatedLocations", []):
+                rpl = rl.get("physicalLocation", {})
+                extra_locs.append({
+                    "uri": rpl.get("artifactLocation", {}).get("uri", ""),
+                    "startLine": rpl.get("region", {}).get("startLine", 0),
+                    "message": rl.get("message", {}).get("text", ""),
+                })
+
             findings.append(SarifFinding(
                 rule_id=rule_id,
                 message=message,
                 file_uri=uri,
                 start_line=line,
+                additional_locations=extra_locs,
             ))
 
     logger.info("SARIF 解析完成，共 %d 条发现。", len(findings))
     return findings
+
+
+_SINK_METHOD_RE = re.compile(r"`([a-zA-Z_][\w.]*(?:\([^)]*\))?)`")
+
+
+def _extract_sink_method(message: str) -> str:
+    """从 SARIF message 中提取结构化的 sink 方法名。
+
+    优先匹配反引号中的方法签名（如 ``parseExpression(...)``），
+    匹配失败时回退到截取前 80 字符。
+    """
+    if not message:
+        return ""
+    matches = _SINK_METHOD_RE.findall(message)
+    if matches:
+        return matches[-1]
+    return message[:80]
 
 
 def _load_code_context(
@@ -646,11 +685,35 @@ def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]
             else:
                 raise ValueError(f"批量 JSON 解析失败: 未找到 JSON 结构\n原始内容:\n{raw[:500]}")
 
-    if isinstance(parsed, list):
-        return parsed
     if isinstance(parsed, dict):
-        return [parsed]
-    raise ValueError(f"期望 JSON 数组，实际类型: {type(parsed).__name__}")
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        raise ValueError(f"期望 JSON 数组，实际类型: {type(parsed).__name__}")
+
+    if expected_count > 0 and all("id" in item for item in parsed):
+        indexed: dict[int, dict] = {}
+        for item in parsed:
+            try:
+                idx = int(item["id"])
+                indexed[idx] = item
+            except (ValueError, TypeError):
+                pass
+        if indexed:
+            aligned: list[dict] = []
+            for i in range(1, expected_count + 1):
+                if i in indexed:
+                    aligned.append(indexed[i])
+                else:
+                    aligned.append({
+                        "id": i,
+                        "verdict": "UNCERTAIN",
+                        "confidence": 0.3,
+                        "engine": "",
+                        "reasoning": f"Finding #{i} 缺失 LLM 响应，默认标记为 UNCERTAIN",
+                    })
+            return aligned
+
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +861,7 @@ class AgentR(BaseAgent):
                     f.code_context = code_browser.build_rich_context(
                         file_uri=f.file_uri,
                         center_line=f.start_line,
-                        sink_method=f.message[:80] if f.message else "",
+                        sink_method=_extract_sink_method(f.message),
                         base_window=self.context_lines,
                     )
                 except Exception:

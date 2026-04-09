@@ -594,8 +594,13 @@ private class KernelUserInput extends DataFlow::Node {
 private class KernelDangerousSink extends DataFlow::Node {
   KernelDangerousSink() {
     exists(FunctionCall fc |
-      fc.getTarget().hasName(["memcpy", "__memcpy", "memmove", "kmalloc", "kzalloc"]) and
-      this.asExpr() = fc.getArgument(fc.getTarget().hasName(["kmalloc", "kzalloc"]).booleanNot().booleanAnd(true).toString().toInt())
+      fc.getTarget().hasName(["memcpy", "__memcpy", "memmove"]) and
+      this.asExpr() = fc.getArgument(1)
+    )
+    or
+    exists(FunctionCall fc |
+      fc.getTarget().hasName(["kmalloc", "kzalloc"]) and
+      this.asExpr() = fc.getArgument(0)
     )
     or
     exists(ArrayExpr ae | this.asExpr() = ae.getArrayOffset())
@@ -829,20 +834,27 @@ def _extract_ql_code(raw_output: str) -> str:
     """
     从 LLM 输出中提取纯 .ql 代码。
 
-    LLM 有时会用 markdown 代码块包裹输出，此函数负责剥离外层包装。
-
-    Args:
-        raw_output: LLM 原始返回字符串。
-
-    Returns:
-        去除 markdown 代码块标记后的纯 .ql 代码字符串。
+    当 LLM 返回多个 markdown 代码块时，优先选择包含 ``import`` 语句的代码块
+    （最可能是完整查询），其次选择最长的代码块。
     """
-    # 匹配 ```ql ... ``` 或 ``` ... ``` 包裹的代码块
-    pattern = re.compile(r"```(?:ql)?\s*\n(.*?)```", re.DOTALL)
-    match = pattern.search(raw_output)
-    if match:
-        return match.group(1).strip()
-    return raw_output.strip()
+    pattern = re.compile(r"```(?:ql|codeql)?\s*\n(.*?)```", re.DOTALL)
+    blocks = pattern.findall(raw_output)
+    if not blocks:
+        return raw_output.strip()
+    if len(blocks) == 1:
+        return blocks[0].strip()
+
+    scored: list[tuple[int, int, str]] = []
+    for idx, block in enumerate(blocks):
+        text = block.strip()
+        score = len(text)
+        if re.search(r"^\s*import\s+", text, re.MULTILINE):
+            score += 100_000
+        if re.search(r"\bfrom\s+\w+", text) and re.search(r"\bwhere\b", text) and re.search(r"\bselect\b", text):
+            score += 50_000
+        scored.append((score, -idx, text))
+    scored.sort(reverse=True)
+    return scored[0][2]
 
 
 # ---------------------------------------------------------------------------

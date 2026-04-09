@@ -1772,6 +1772,690 @@ select sink, "XSS: user-controlled data from $@ flows into HTTP response without
 )
 
 # ---------------------------------------------------------------------------
+# Java 新增模板（XSS / Deserialization / XXE / LDAP）
+# ---------------------------------------------------------------------------
+
+_JAVA_XSS = QLTemplate(
+    key="java/xss",
+    language="java",
+    vuln_type="xss",
+    description="Java 反射型/存储型 XSS（Servlet response.getWriter 直接输出用户输入）",
+    code="""\
+/**
+ * @name Cross-Site Scripting (Java)
+ * @description User-controlled data flows into HTTP response without escaping.
+ * @kind problem
+ * @problem.severity error
+ * @id java/xss
+ * @tags security external/cwe/cwe-079
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class XssSink extends DataFlow::Node {
+  XssSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.io", "PrintWriter", "print") or
+        mc.getMethod().hasQualifiedName("java.io", "PrintWriter", "println") or
+        mc.getMethod().hasQualifiedName("java.io", "PrintWriter", "write") or
+        mc.getMethod().hasQualifiedName("javax.servlet", "ServletOutputStream", "print") or
+        mc.getMethod().hasQualifiedName("javax.servlet", "ServletOutputStream", "println")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module XssConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XssSink }
+}
+
+module XssFlow = TaintTracking::Global<XssConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XssFlow::flow(source, sink)
+select sink, "XSS: user-controlled data from $@ flows into HTTP response without escaping.", source, "user input"
+""",
+)
+
+_JAVA_DESERIALIZATION = QLTemplate(
+    key="java/deserialization",
+    language="java",
+    vuln_type="deserialization",
+    description="Java 不安全反序列化（ObjectInputStream.readObject）",
+    code="""\
+/**
+ * @name Unsafe Deserialization (Java)
+ * @description User-controlled data flows into ObjectInputStream.readObject,
+ *              enabling arbitrary code execution via gadget chains.
+ * @kind problem
+ * @problem.severity error
+ * @id java/unsafe-deserialization
+ * @tags security external/cwe/cwe-502
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class DeserSink extends DataFlow::Node {
+  DeserSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("java.io", "ObjectInputStream", "readObject") or
+        mc.getMethod().hasQualifiedName("java.io", "ObjectInputStream", "readUnshared")
+      ) and
+      this.asExpr() = mc.getQualifier()
+    )
+    or
+    exists(ConstructorCall cc |
+      cc.getConstructedType().hasQualifiedName("java.io", "ObjectInputStream") and
+      this.asExpr() = cc.getArgument(0)
+    )
+  }
+}
+
+module DeserConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof DeserSink }
+}
+
+module DeserFlow = TaintTracking::Global<DeserConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where DeserFlow::flow(source, sink)
+select sink, "Unsafe deserialization: user-controlled data from $@ reaches ObjectInputStream.", source, "user input"
+""",
+)
+
+_JAVA_XXE = QLTemplate(
+    key="java/xxe",
+    language="java",
+    vuln_type="xxe",
+    description="Java XML External Entity 注入（DocumentBuilder / SAXParser / XMLReader）",
+    code="""\
+/**
+ * @name XML External Entity Injection (Java)
+ * @description User-controlled XML is parsed without disabling external entities,
+ *              enabling file disclosure or SSRF.
+ * @kind problem
+ * @problem.severity error
+ * @id java/xxe
+ * @tags security external/cwe/cwe-611
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class XxeSink extends DataFlow::Node {
+  XxeSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("javax.xml.parsers", "DocumentBuilder", "parse") or
+        mc.getMethod().hasQualifiedName("javax.xml.parsers", "SAXParser", "parse") or
+        mc.getMethod().hasQualifiedName("org.xml.sax", "XMLReader", "parse") or
+        mc.getMethod().hasQualifiedName("javax.xml.transform", "Transformer", "transform")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module XxeConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XxeSink }
+}
+
+module XxeFlow = TaintTracking::Global<XxeConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XxeFlow::flow(source, sink)
+select sink, "XXE: user-controlled XML from $@ flows into XML parser without disabling external entities.", source, "user input"
+""",
+)
+
+_JAVA_LDAP_INJECTION = QLTemplate(
+    key="java/ldap-injection",
+    language="java",
+    vuln_type="ldap injection",
+    description="Java LDAP 注入（DirContext.search 过滤器拼接用户输入）",
+    code="""\
+/**
+ * @name LDAP Injection (Java)
+ * @description User-controlled data flows into LDAP search filter without sanitization.
+ * @kind problem
+ * @problem.severity error
+ * @id java/ldap-injection
+ * @tags security external/cwe/cwe-090
+ */
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources
+
+private class LdapSink extends DataFlow::Node {
+  LdapSink() {
+    exists(MethodCall mc |
+      (
+        mc.getMethod().hasQualifiedName("javax.naming.directory", "DirContext", "search") or
+        mc.getMethod().hasQualifiedName("javax.naming.directory", "InitialDirContext", "search")
+      ) and
+      this.asExpr() = mc.getArgument(1)
+    )
+  }
+}
+
+module LdapConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof LdapSink }
+}
+
+module LdapFlow = TaintTracking::Global<LdapConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where LdapFlow::flow(source, sink)
+select sink, "LDAP injection: user-controlled data from $@ flows into LDAP search filter.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# JavaScript 新增模板（XSS / Prototype Pollution）
+# ---------------------------------------------------------------------------
+
+_JS_XSS = QLTemplate(
+    key="javascript/xss",
+    language="javascript",
+    vuln_type="xss",
+    description="JavaScript 反射型/存储型 XSS（res.send / innerHTML 直接输出用户输入）",
+    code="""\
+/**
+ * @name Cross-Site Scripting (JavaScript)
+ * @description User-controlled data flows into HTTP response or DOM sink without escaping.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/xss
+ * @tags security external/cwe/cwe-079
+ */
+import javascript
+
+private class XssSink extends DataFlow::Node {
+  XssSink() {
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "send" or
+        call.getCalleeName() = "end" or
+        call.getCalleeName() = "write" or
+        call.getCalleeName() = "html"
+      ) and
+      this = call.getArgument(0)
+    )
+    or
+    exists(DataFlow::PropWrite pw |
+      pw.getPropertyName() = "innerHTML" and
+      this = pw.getRhs()
+    )
+  }
+}
+
+module XssConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XssSink }
+}
+
+module XssFlow = TaintTracking::Global<XssConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XssFlow::flow(source, sink)
+select sink, "XSS: user-controlled data from $@ flows into response/DOM without escaping.", source, "user input"
+""",
+)
+
+_JS_PROTOTYPE_POLLUTION = QLTemplate(
+    key="javascript/prototype-pollution",
+    language="javascript",
+    vuln_type="prototype pollution",
+    description="JavaScript 原型链污染（用户可控键值对赋值到对象属性）",
+    code="""\
+/**
+ * @name Prototype Pollution (JavaScript)
+ * @description User-controlled property name flows into dynamic property assignment,
+ *              enabling prototype pollution attacks.
+ * @kind problem
+ * @problem.severity error
+ * @id javascript/prototype-pollution
+ * @tags security external/cwe/cwe-1321
+ */
+import javascript
+
+private class ProtoPollutionSink extends DataFlow::Node {
+  ProtoPollutionSink() {
+    exists(DataFlow::PropWrite pw |
+      pw.getPropertyNameExpr().flow().getALocalSource() instanceof RemoteFlowSource and
+      this = pw.getRhs()
+    )
+    or
+    exists(DataFlow::CallNode call |
+      (
+        call.getCalleeName() = "merge" or
+        call.getCalleeName() = "extend" or
+        call.getCalleeName() = "assign" or
+        call.getCalleeName() = "defaultsDeep"
+      ) and
+      this = call.getArgument(0)
+    )
+  }
+}
+
+module ProtoConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof ProtoPollutionSink }
+}
+
+module ProtoFlow = TaintTracking::Global<ProtoConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where ProtoFlow::flow(source, sink)
+select sink, "Prototype pollution: user-controlled data from $@ flows into dynamic property assignment.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# Solidity 模板集合
+# ---------------------------------------------------------------------------
+
+_SOLIDITY_REENTRANCY = QLTemplate(
+    key="solidity/reentrancy",
+    language="solidity",
+    vuln_type="reentrancy",
+    description="Solidity 重入攻击（外部调用后修改状态变量）",
+    code="""\
+/**
+ * @name Reentrancy Vulnerability (Solidity)
+ * @description External call is made before state variable update,
+ *              enabling reentrancy attack.
+ * @kind problem
+ * @problem.severity error
+ * @id solidity/reentrancy
+ * @tags security external/cwe/cwe-841
+ */
+import solidity
+
+from FunctionDefinition f, ExternalCall ec, StateVariableWrite sw
+where
+  ec.getEnclosingFunction() = f and
+  sw.getEnclosingFunction() = f and
+  ec.getLocation().getStartLine() < sw.getLocation().getStartLine() and
+  not exists(Modifier m |
+    m.getName() = "nonReentrant" and
+    f.getAModifier() = m
+  )
+select ec,
+  "Reentrancy: external call at line " + ec.getLocation().getStartLine().toString() +
+  " precedes state update at line " + sw.getLocation().getStartLine().toString() +
+  " in function " + f.getName()
+""",
+)
+
+_SOLIDITY_UNCHECKED_CALL = QLTemplate(
+    key="solidity/unchecked-call",
+    language="solidity",
+    vuln_type="unchecked call",
+    description="Solidity 未检查的外部调用返回值（call/send/transfer 返回值被忽略）",
+    code="""\
+/**
+ * @name Unchecked External Call (Solidity)
+ * @description Return value of low-level call/send is not checked,
+ *              which may silently fail.
+ * @kind problem
+ * @problem.severity warning
+ * @id solidity/unchecked-call
+ * @tags security external/cwe/cwe-252
+ */
+import solidity
+
+from LowLevelCall llc
+where
+  not exists(IfStmt ifStmt |
+    ifStmt.getCondition().getAChild*() = llc
+  ) and
+  not exists(RequireCall req |
+    req.getArgument(0).getAChild*() = llc
+  ) and
+  not exists(AssignExpr ae |
+    ae.getRhs().getAChild*() = llc
+  )
+select llc,
+  "Unchecked low-level call: return value of " + llc.toString() + " is not checked"
+""",
+)
+
+_SOLIDITY_TX_ORIGIN = QLTemplate(
+    key="solidity/tx-origin",
+    language="solidity",
+    vuln_type="tx.origin",
+    description="Solidity tx.origin 鉴权绕过（使用 tx.origin 代替 msg.sender 做访问控制）",
+    code="""\
+/**
+ * @name tx.origin Authentication Bypass (Solidity)
+ * @description Using tx.origin for authorization enables phishing attacks.
+ * @kind problem
+ * @problem.severity warning
+ * @id solidity/tx-origin
+ * @tags security external/cwe/cwe-477
+ */
+import solidity
+
+from RequireCall req, MemberAccess ma
+where
+  ma.getMemberName() = "origin" and
+  ma.getExpression().toString() = "tx" and
+  req.getArgument(0).getAChild*() = ma
+select req,
+  "Authentication bypass: tx.origin is used for authorization instead of msg.sender"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# C# 新增模板（XSS / Deserialization）
+# ---------------------------------------------------------------------------
+
+_CSHARP_XSS = QLTemplate(
+    key="csharp/xss",
+    language="csharp",
+    vuln_type="xss",
+    description="C# 反射型 XSS（MVC Content / HTML raw 输出）",
+    code="""\
+/**
+ * @name Cross-Site Scripting (C#)
+ * @description User-controlled data flows into HTTP response without encoding.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/xss
+ * @tags security external/cwe/cwe-079
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class XssSink extends DataFlow::Node {
+  XssSink() {
+    exists(MethodCall mc |
+      (
+        mc.getTarget().getName() = "Content" or
+        mc.getTarget().getName() = "Write" or
+        mc.getTarget().getName() = "WriteLiteral" or
+        mc.getTarget().getName() = "Raw"
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module XssConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof XssSink }
+}
+
+module XssFlow = TaintTracking::Global<XssConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where XssFlow::flow(source, sink)
+select sink, "XSS: user-controlled data from $@ flows into HTTP response without encoding.", source, "user input"
+""",
+)
+
+_CSHARP_DESERIALIZATION = QLTemplate(
+    key="csharp/deserialization",
+    language="csharp",
+    vuln_type="deserialization",
+    description="C# 不安全反序列化（BinaryFormatter / JavaScriptSerializer / Newtonsoft TypeNameHandling）",
+    code="""\
+/**
+ * @name Unsafe Deserialization (C#)
+ * @description User-controlled data flows into an unsafe deserializer,
+ *              enabling arbitrary code execution.
+ * @kind problem
+ * @problem.severity error
+ * @id csharp/unsafe-deserialization
+ * @tags security external/cwe/cwe-502
+ */
+import csharp
+import semmle.code.csharp.dataflow.TaintTracking
+import semmle.code.csharp.dataflow.DataFlow
+import semmle.code.csharp.security.dataflow.flowsources.Remote
+
+private class DeserSink extends DataFlow::Node {
+  DeserSink() {
+    exists(MethodCall mc |
+      (
+        mc.getTarget().hasQualifiedName("System.Runtime.Serialization.Formatters.Binary", "BinaryFormatter", "Deserialize") or
+        mc.getTarget().hasQualifiedName("System.Web.Script.Serialization", "JavaScriptSerializer", "Deserialize") or
+        mc.getTarget().hasQualifiedName("Newtonsoft.Json", "JsonConvert", "DeserializeObject")
+      ) and
+      this.asExpr() = mc.getArgument(0)
+    )
+  }
+}
+
+module DeserConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof DeserSink }
+}
+
+module DeserFlow = TaintTracking::Global<DeserConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where DeserFlow::flow(source, sink)
+select sink, "Unsafe deserialization: user-controlled data from $@ reaches unsafe deserializer.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# Python 新增模板（Deserialization / LDAP）
+# ---------------------------------------------------------------------------
+
+_PYTHON_DESERIALIZATION = QLTemplate(
+    key="python/deserialization",
+    language="python",
+    vuln_type="deserialization",
+    description="Python 不安全反序列化（pickle.loads / yaml.load / marshal.loads）",
+    code="""\
+/**
+ * @name Unsafe Deserialization (Python)
+ * @description User-controlled data flows into pickle.loads or yaml.load,
+ *              enabling arbitrary code execution.
+ * @kind problem
+ * @problem.severity error
+ * @id python/unsafe-deserialization
+ * @tags security external/cwe/cwe-502
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class DeserSink extends DataFlow::Node {
+  DeserSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "loads" or
+        c.getFunc().(Attribute).getName() = "load"
+      ) and
+      this.asExpr() = c.getArg(0)
+    )
+  }
+}
+
+module DeserConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof DeserSink }
+}
+
+module DeserFlow = TaintTracking::Global<DeserConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where DeserFlow::flow(source, sink)
+select sink, "Unsafe deserialization: user-controlled data from $@ reaches pickle/yaml deserializer.", source, "user input"
+""",
+)
+
+_PYTHON_LDAP_INJECTION = QLTemplate(
+    key="python/ldap-injection",
+    language="python",
+    vuln_type="ldap injection",
+    description="Python LDAP 注入（ldap.search_s 过滤器拼接用户输入）",
+    code="""\
+/**
+ * @name LDAP Injection (Python)
+ * @description User-controlled data flows into LDAP search filter without escaping.
+ * @kind problem
+ * @problem.severity error
+ * @id python/ldap-injection
+ * @tags security external/cwe/cwe-090
+ */
+import python
+import semmle.code.python.dataflow.new.DataFlow
+import semmle.code.python.dataflow.new.TaintTracking
+import semmle.code.python.dataflow.new.RemoteFlowSources
+
+private class LdapSink extends DataFlow::Node {
+  LdapSink() {
+    exists(Call c |
+      (
+        c.getFunc().(Attribute).getName() = "search_s" or
+        c.getFunc().(Attribute).getName() = "search" or
+        c.getFunc().(Attribute).getName() = "search_ext_s"
+      ) and
+      this.asExpr() = c.getArg(2)
+    )
+  }
+}
+
+module LdapConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof RemoteFlowSource }
+  predicate isSink(DataFlow::Node sink) { sink instanceof LdapSink }
+}
+
+module LdapFlow = TaintTracking::Global<LdapConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where LdapFlow::flow(source, sink)
+select sink, "LDAP injection: user-controlled data from $@ flows into LDAP search filter.", source, "user input"
+""",
+)
+
+# ---------------------------------------------------------------------------
+# C++ 新增模板（Format String / Use-After-Free）
+# ---------------------------------------------------------------------------
+
+_CPP_FORMAT_STRING = QLTemplate(
+    key="cpp/format-string",
+    language="cpp",
+    vuln_type="format string",
+    description="C/C++ 格式化字符串漏洞（printf/sprintf/fprintf 用户可控格式串）",
+    code="""\
+/**
+ * @name Format String Vulnerability (C/C++)
+ * @description User-controlled data is used as a format string argument.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/format-string
+ * @tags security external/cwe/cwe-134
+ */
+import cpp
+import semmle.code.cpp.dataflow.TaintTracking
+import semmle.code.cpp.dataflow.DataFlow
+
+private class FormatStringSink extends DataFlow::Node {
+  FormatStringSink() {
+    exists(FunctionCall fc, int fmtIdx |
+      (
+        fc.getTarget().hasName("printf") and fmtIdx = 0 or
+        fc.getTarget().hasName("fprintf") and fmtIdx = 1 or
+        fc.getTarget().hasName("sprintf") and fmtIdx = 1 or
+        fc.getTarget().hasName("snprintf") and fmtIdx = 2 or
+        fc.getTarget().hasName("syslog") and fmtIdx = 1
+      ) and
+      this.asExpr() = fc.getArgument(fmtIdx)
+    )
+  }
+}
+
+private class ExternalInput extends DataFlow::Node {
+  ExternalInput() {
+    exists(Function main, Parameter argv |
+      main.hasName("main") and
+      argv = main.getParameter(1) and
+      this.asParameter() = argv
+    )
+    or
+    exists(FunctionCall fc |
+      (
+        fc.getTarget().hasName("getenv") or
+        fc.getTarget().hasName("fgets") or
+        fc.getTarget().hasName("gets") or
+        fc.getTarget().hasName("recv")
+      ) and
+      this.asExpr() = fc
+    )
+  }
+}
+
+module FmtConfig implements DataFlow::ConfigSig {
+  predicate isSource(DataFlow::Node src) { src instanceof ExternalInput }
+  predicate isSink(DataFlow::Node sink) { sink instanceof FormatStringSink }
+}
+
+module FmtFlow = TaintTracking::Global<FmtConfig>;
+
+from DataFlow::Node source, DataFlow::Node sink
+where FmtFlow::flow(source, sink)
+select sink, "Format string vulnerability: user-controlled data from $@ used as format string.", source, "user input"
+""",
+)
+
+_CPP_USE_AFTER_FREE = QLTemplate(
+    key="cpp/use-after-free",
+    language="cpp",
+    vuln_type="use after free",
+    description="C/C++ 释放后使用（free 之后继续解引用指针）",
+    code="""\
+/**
+ * @name Use After Free (C/C++)
+ * @description Pointer is dereferenced after being freed.
+ * @kind problem
+ * @problem.severity error
+ * @id cpp/use-after-free
+ * @tags security external/cwe/cwe-416
+ */
+import cpp
+import semmle.code.cpp.dataflow.DataFlow
+
+from FunctionCall freeCall, VariableAccess useAccess, Variable v
+where
+  (freeCall.getTarget().hasName("free") or freeCall.getTarget().hasName("kfree")) and
+  freeCall.getArgument(0).(VariableAccess).getTarget() = v and
+  useAccess.getTarget() = v and
+  useAccess.getLocation().getStartLine() > freeCall.getLocation().getStartLine() and
+  useAccess.getEnclosingFunction() = freeCall.getEnclosingFunction() and
+  not exists(AssignExpr reassign |
+    reassign.getLValue().(VariableAccess).getTarget() = v and
+    reassign.getLocation().getStartLine() > freeCall.getLocation().getStartLine() and
+    reassign.getLocation().getStartLine() < useAccess.getLocation().getStartLine()
+  )
+select useAccess,
+  "Use after free: variable '" + v.getName() + "' is used after being freed at line " +
+  freeCall.getLocation().getStartLine().toString()
+""",
+)
+
+# ---------------------------------------------------------------------------
 # 模板注册表
 # ---------------------------------------------------------------------------
 
@@ -1786,6 +2470,10 @@ _ALL_TEMPLATES: list[QLTemplate] = [
     _JAVA_COMMAND_INJECTION,
     _JAVA_PATH_TRAVERSAL,
     _JAVA_SSRF,
+    _JAVA_XSS,
+    _JAVA_DESERIALIZATION,
+    _JAVA_XXE,
+    _JAVA_LDAP_INJECTION,
     # Python - 模板注入
     _PYTHON_JINJA2,
     _PYTHON_MAKO,
@@ -1793,33 +2481,43 @@ _ALL_TEMPLATES: list[QLTemplate] = [
     # Python - 通用
     _PYTHON_SQL_INJECTION,
     _PYTHON_COMMAND_INJECTION,
+    _PYTHON_PATH_TRAVERSAL,
+    _PYTHON_XSS,
+    _PYTHON_SSRF,
+    _PYTHON_DESERIALIZATION,
+    _PYTHON_LDAP_INJECTION,
     # JavaScript
     _JS_SQL_INJECTION,
     _JS_COMMAND_INJECTION,
     _JS_PATH_TRAVERSAL,
     _JS_SSRF,
+    _JS_XSS,
+    _JS_PROTOTYPE_POLLUTION,
     # Go
     _GO_SQL_INJECTION,
     _GO_COMMAND_INJECTION,
     _GO_PATH_TRAVERSAL,
     _GO_SSRF,
+    _GO_XSS,
     # C#
     _CSHARP_SQL_INJECTION,
     _CSHARP_COMMAND_INJECTION,
     _CSHARP_PATH_TRAVERSAL,
     _CSHARP_SSRF,
+    _CSHARP_XSS,
+    _CSHARP_DESERIALIZATION,
     # C++
     _CPP_COMMAND_INJECTION,
     _CPP_PATH_TRAVERSAL,
     _CPP_SQL_INJECTION,
     _CPP_BUFFER_OVERFLOW,
     _CPP_SSRF,
-    # Python - 新增
-    _PYTHON_PATH_TRAVERSAL,
-    _PYTHON_XSS,
-    _PYTHON_SSRF,
-    # Go - 新增
-    _GO_XSS,
+    _CPP_FORMAT_STRING,
+    _CPP_USE_AFTER_FREE,
+    # Solidity
+    _SOLIDITY_REENTRANCY,
+    _SOLIDITY_UNCHECKED_CALL,
+    _SOLIDITY_TX_ORIGIN,
 ]
 
 # 关键词 → 模板映射（优先精确匹配）
@@ -1860,6 +2558,17 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _JAVA_SSRF,
         "server-side request forgery":  _JAVA_SSRF,
         "server side request forgery":  _JAVA_SSRF,
+        "xss":                          _JAVA_XSS,
+        "cross-site scripting":        _JAVA_XSS,
+        "cross site scripting":        _JAVA_XSS,
+        "deserialization":             _JAVA_DESERIALIZATION,
+        "unsafe deserialization":      _JAVA_DESERIALIZATION,
+        "readobject":                   _JAVA_DESERIALIZATION,
+        "xxe":                          _JAVA_XXE,
+        "xml external entity":         _JAVA_XXE,
+        "xml injection":               _JAVA_XXE,
+        "ldap injection":              _JAVA_LDAP_INJECTION,
+        "ldap":                         _JAVA_LDAP_INJECTION,
     },
     "python": {
         "sql injection":                _PYTHON_SQL_INJECTION,
@@ -1877,6 +2586,12 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _PYTHON_SSRF,
         "server-side request forgery":  _PYTHON_SSRF,
         "server side request forgery":  _PYTHON_SSRF,
+        "deserialization":             _PYTHON_DESERIALIZATION,
+        "unsafe deserialization":      _PYTHON_DESERIALIZATION,
+        "pickle":                       _PYTHON_DESERIALIZATION,
+        "yaml.load":                    _PYTHON_DESERIALIZATION,
+        "ldap injection":              _PYTHON_LDAP_INJECTION,
+        "ldap":                         _PYTHON_LDAP_INJECTION,
     },
     "javascript": {
         "sql injection":                _JS_SQL_INJECTION,
@@ -1891,6 +2606,11 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _JS_SSRF,
         "server-side request forgery":  _JS_SSRF,
         "server side request forgery":  _JS_SSRF,
+        "xss":                          _JS_XSS,
+        "cross-site scripting":        _JS_XSS,
+        "cross site scripting":        _JS_XSS,
+        "prototype pollution":         _JS_PROTOTYPE_POLLUTION,
+        "prototype":                    _JS_PROTOTYPE_POLLUTION,
     },
     "go": {
         "sql injection":                _GO_SQL_INJECTION,
@@ -1922,6 +2642,12 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _CSHARP_SSRF,
         "server-side request forgery":  _CSHARP_SSRF,
         "server side request forgery":  _CSHARP_SSRF,
+        "xss":                          _CSHARP_XSS,
+        "cross-site scripting":        _CSHARP_XSS,
+        "cross site scripting":        _CSHARP_XSS,
+        "deserialization":             _CSHARP_DESERIALIZATION,
+        "unsafe deserialization":      _CSHARP_DESERIALIZATION,
+        "binaryformatter":             _CSHARP_DESERIALIZATION,
     },
     "cpp": {
         "command injection":            _CPP_COMMAND_INJECTION,
@@ -1940,6 +2666,22 @@ _LANG_KEYWORD_MAP: dict[str, dict[str, QLTemplate]] = {
         "ssrf":                         _CPP_SSRF,
         "server-side request forgery":  _CPP_SSRF,
         "server side request forgery":  _CPP_SSRF,
+        "format string":               _CPP_FORMAT_STRING,
+        "printf":                       _CPP_FORMAT_STRING,
+        "use after free":              _CPP_USE_AFTER_FREE,
+        "uaf":                          _CPP_USE_AFTER_FREE,
+        "double free":                 _CPP_USE_AFTER_FREE,
+    },
+    "solidity": {
+        "reentrancy":                   _SOLIDITY_REENTRANCY,
+        "reentrant":                    _SOLIDITY_REENTRANCY,
+        "re-entrancy":                  _SOLIDITY_REENTRANCY,
+        "unchecked call":              _SOLIDITY_UNCHECKED_CALL,
+        "unchecked return":            _SOLIDITY_UNCHECKED_CALL,
+        "unchecked send":              _SOLIDITY_UNCHECKED_CALL,
+        "tx.origin":                    _SOLIDITY_TX_ORIGIN,
+        "tx origin":                    _SOLIDITY_TX_ORIGIN,
+        "authentication bypass":       _SOLIDITY_TX_ORIGIN,
     },
 }
 

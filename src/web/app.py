@@ -45,9 +45,39 @@ app = Flask(
     template_folder=str(Path(__file__).parent / "templates"),
     static_folder=str(Path(__file__).parent / "static"),
 )
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "qrse-x-dev-key")
+_flask_secret = os.environ.get("FLASK_SECRET_KEY")
+if not _flask_secret:
+    import secrets as _secrets
+    _flask_secret = _secrets.token_hex(32)
+    logger.warning(
+        "FLASK_SECRET_KEY 未设置，已生成随机密钥。"
+        "生产环境请通过环境变量 FLASK_SECRET_KEY 设置固定密钥。"
+    )
+app.secret_key = _flask_secret
 
 scan_manager = ScanManager()
+
+_ARGUS_API_KEY = os.environ.get("ARGUS_API_KEY", "")
+
+_PROTECTED_ENDPOINTS = {
+    "api_memory_clear", "api_memory_import", "api_memory_verify",
+    "api_memory_quarantine", "api_ablation_start",
+}
+
+
+def _require_api_key(f):
+    """保护敏感 API 接口的装饰器——检查 X-API-Key 请求头。"""
+    from functools import wraps
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _ARGUS_API_KEY:
+            return f(*args, **kwargs)
+        provided = request.headers.get("X-API-Key", "")
+        if not provided or provided != _ARGUS_API_KEY:
+            return jsonify({"error": "未授权：缺少或无效的 API Key"}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +296,7 @@ def api_memory_export():
 
 
 @app.route("/api/memory/import", methods=["POST"])
+@_require_api_key
 def api_memory_import():
     if "file" not in request.files:
         return jsonify({"error": "no file uploaded"}), 400
@@ -275,19 +306,25 @@ def api_memory_import():
     mem = _get_memory()
     merge = request.form.get("merge", "true").lower() == "true"
     imported = mem.import_bundle(str(tmp), merge=merge)
+    global _cached_memory
+    _cached_memory = None
     return jsonify({"imported": imported})
 
 
 @app.route("/api/memory/clear", methods=["POST"])
+@_require_api_key
 def api_memory_clear():
+    global _cached_memory
     import shutil
     mem_dir = Path(_RULE_MEMORY_DIR)
     if mem_dir.exists():
         shutil.rmtree(mem_dir)
+    _cached_memory = None
     return jsonify({"status": "cleared"})
 
 
 @app.route("/api/memory/<rule_id>/verify", methods=["POST"])
+@_require_api_key
 def api_memory_verify(rule_id: str):
     payload = request.get_json(force=True)
     mem = _get_memory()
@@ -298,16 +335,21 @@ def api_memory_verify(rule_id: str):
     )
     if not ok:
         return jsonify({"error": "record not found"}), 404
+    global _cached_memory
+    _cached_memory = None
     return jsonify({"status": "verified", "rule_id": rule_id})
 
 
 @app.route("/api/memory/<rule_id>/quarantine", methods=["POST"])
+@_require_api_key
 def api_memory_quarantine(rule_id: str):
     payload = request.get_json(force=True)
     mem = _get_memory()
     ok = mem.quarantine(rule_id, reason=payload.get("reason", "web_ui"))
     if not ok:
         return jsonify({"error": "record not found"}), 404
+    global _cached_memory
+    _cached_memory = None
     return jsonify({"status": "quarantined", "rule_id": rule_id})
 
 
@@ -493,6 +535,7 @@ def api_benchmark_scores():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/ablation/start", methods=["POST"])
+@_require_api_key
 def api_ablation_start():
     """启动一键消融实验套件。"""
     payload = request.get_json(force=True)

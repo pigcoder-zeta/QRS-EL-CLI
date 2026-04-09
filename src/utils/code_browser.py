@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_EXTENSIONS: set[str] = {
     ".java", ".py", ".js", ".ts", ".jsx", ".tsx",
     ".go", ".cs", ".cpp", ".c", ".h", ".hpp",
-    ".kt", ".scala", ".rb", ".php",
+    ".kt", ".scala", ".rb", ".php", ".sol",
 }
 
 
@@ -85,12 +85,31 @@ _DEFINITION_PATTERNS: dict[str, list[tuple[str, str]]] = {
         (r"(?:class|struct)\s+(\w+)", "class"),
         (r"[\w:*&<>\s]+\s+(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:\{|;)", "function"),
     ],
+    "solidity": [
+        (r"^\s*contract\s+(\w+)", "class"),
+        (r"^\s*library\s+(\w+)", "class"),
+        (r"^\s*interface\s+(\w+)", "class"),
+        (r"^\s*function\s+(\w+)\s*\(", "function"),
+        (r"^\s*modifier\s+(\w+)", "function"),
+        (r"^\s*event\s+(\w+)", "function"),
+    ],
+    "ruby": [
+        (r"^\s*class\s+(\w+)", "class"),
+        (r"^\s*module\s+(\w+)", "class"),
+        (r"^\s*def\s+(\w+)", "function"),
+    ],
+    "php": [
+        (r"^\s*(?:abstract\s+|final\s+)?class\s+(\w+)", "class"),
+        (r"^\s*interface\s+(\w+)", "class"),
+        (r"^\s*(?:public|private|protected|static)?\s*function\s+(\w+)", "function"),
+    ],
 }
 
 _LANG_BY_EXT: dict[str, str] = {
     ".java": "java", ".py": "python", ".js": "javascript", ".ts": "javascript",
     ".jsx": "javascript", ".tsx": "javascript", ".go": "go", ".cs": "csharp",
     ".cpp": "cpp", ".c": "cpp", ".h": "cpp", ".hpp": "cpp",
+    ".sol": "solidity", ".rb": "ruby", ".php": "php",
 }
 
 
@@ -98,6 +117,78 @@ def _detect_lang(file_path: str) -> str:
     """根据文件扩展名推测语言。"""
     ext = Path(file_path).suffix.lower()
     return _LANG_BY_EXT.get(ext, "")
+
+
+# ---------------------------------------------------------------------------
+# Tree-sitter 可选集成
+# ---------------------------------------------------------------------------
+
+_TS_AVAILABLE = False
+_TS_PARSERS: dict[str, object] = {}
+_TS_LANG_MAP: dict[str, str] = {
+    "java": "java", "python": "python", "javascript": "javascript",
+    "go": "go", "cpp": "cpp", "csharp": "c_sharp", "ruby": "ruby",
+    "php": "php",
+}
+
+try:
+    from tree_sitter import Language, Parser  # type: ignore[import-untyped]
+    import tree_sitter_languages  # type: ignore[import-untyped]
+    _TS_AVAILABLE = True
+    logger.info("[CodeBrowser] tree-sitter 可用，启用 AST 解析模式")
+except ImportError:
+    pass
+
+
+def _ts_extract_symbols(source: str, lang: str) -> list[tuple[str, str, int]]:
+    """使用 tree-sitter 从源码中提取符号定义。
+
+    Returns:
+        [(symbol_name, kind, line_number), ...]
+    """
+    if not _TS_AVAILABLE or lang not in _TS_LANG_MAP:
+        return []
+
+    ts_lang_name = _TS_LANG_MAP[lang]
+    try:
+        if ts_lang_name not in _TS_PARSERS:
+            parser = Parser()
+            ts_lang = tree_sitter_languages.get_language(ts_lang_name)  # type: ignore[name-defined]
+            parser.set_language(ts_lang)
+            _TS_PARSERS[ts_lang_name] = parser
+        parser = _TS_PARSERS[ts_lang_name]
+
+        tree = parser.parse(source.encode("utf-8"))  # type: ignore[union-attr]
+        symbols: list[tuple[str, str, int]] = []
+
+        _CLASS_NODES = {
+            "class_declaration", "class_definition", "interface_declaration",
+            "enum_declaration", "struct_specifier", "type_declaration",
+            "module_definition",
+        }
+        _FUNC_NODES = {
+            "method_declaration", "function_definition", "function_declaration",
+            "method_definition", "arrow_function", "function_item",
+        }
+
+        def _walk(node):  # type: ignore[no-untyped-def]
+            if node.type in _CLASS_NODES:
+                for child in node.children:
+                    if child.type in ("identifier", "name", "type_identifier"):
+                        symbols.append((child.text.decode(), "class", node.start_point[0] + 1))
+                        break
+            elif node.type in _FUNC_NODES:
+                for child in node.children:
+                    if child.type in ("identifier", "name", "property_identifier"):
+                        symbols.append((child.text.decode(), "function", node.start_point[0] + 1))
+                        break
+            for child in node.children:
+                _walk(child)
+
+        _walk(tree.root_node)
+        return symbols
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -146,24 +237,51 @@ class CodeBrowser:
         except OSError:
             return []
 
-    _MAX_SOURCE_FILES = 500
+    _MAX_SOURCE_FILES = 2000
 
     def _iter_source_files(self):
-        """遍历仓库中的所有源码文件（超过上限则截断，避免大仓库全量扫描卡死）。"""
-        count = 0
+        """遍历仓库中的所有源码文件。
+
+        超过上限时采用采样策略：优先保留目标语言文件和较小的文件，
+        确保关键代码不被遗漏。
+        """
+        _SKIP_DIRS = ("node_modules/", ".git/", "vendor/", "target/", "build/", "__pycache__/", "dist/", ".venv/")
+        all_files: list[tuple[Path, str]] = []
         for fp in self.repo_root.rglob("*"):
             if fp.suffix.lower() in _SOURCE_EXTENSIONS and fp.is_file():
                 rel = str(fp.relative_to(self.repo_root)).replace("\\", "/")
-                if any(seg in rel for seg in ("node_modules/", ".git/", "vendor/", "target/", "build/", "__pycache__/")):
+                if any(seg in rel for seg in _SKIP_DIRS):
                     continue
-                yield fp, rel
-                count += 1
-                if count >= self._MAX_SOURCE_FILES:
-                    logger.warning(
-                        "[CodeBrowser] 源文件数超过 %d，截断遍历以避免性能问题",
-                        self._MAX_SOURCE_FILES,
-                    )
-                    return
+                all_files.append((fp, rel))
+
+        if len(all_files) <= self._MAX_SOURCE_FILES:
+            yield from all_files
+            return
+
+        logger.warning(
+            "[CodeBrowser] 源文件数 %d 超过上限 %d，启用采样策略",
+            len(all_files), self._MAX_SOURCE_FILES,
+        )
+        target_ext = {
+            "java": {".java"}, "python": {".py"}, "javascript": {".js", ".ts", ".jsx", ".tsx"},
+            "go": {".go"}, "csharp": {".cs"}, "cpp": {".cpp", ".c", ".h", ".hpp"},
+            "solidity": {".sol"}, "ruby": {".rb"}, "php": {".php"},
+        }.get(self.language, set())
+
+        primary = [(fp, rel) for fp, rel in all_files if fp.suffix.lower() in target_ext] if target_ext else []
+        secondary = [(fp, rel) for fp, rel in all_files if (fp, rel) not in set(primary)]
+
+        count = 0
+        for fp, rel in primary:
+            yield fp, rel
+            count += 1
+            if count >= self._MAX_SOURCE_FILES:
+                return
+        for fp, rel in secondary:
+            yield fp, rel
+            count += 1
+            if count >= self._MAX_SOURCE_FILES:
+                return
 
     # ------------------------------------------------------------------
     # 1. 符号索引构建与定义查询
@@ -187,23 +305,37 @@ class CodeBrowser:
         for fp, rel in self._iter_source_files():
             file_count += 1
             lang = _detect_lang(rel) or self.language
-            lang_patterns = _DEFINITION_PATTERNS.get(lang, all_patterns)
             try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                source = fp.read_text(encoding="utf-8", errors="replace")
+                lines = source.splitlines()
             except OSError:
                 continue
             self._file_cache[rel] = lines
-            for i, line in enumerate(lines):
-                for pattern, kind in lang_patterns:
-                    for m in re.finditer(pattern, line):
-                        name = m.group(1)
-                        loc = SymbolLocation(
-                            file_path=rel, line=i + 1, column=m.start(1),
-                            symbol_name=name, kind=kind,
-                            context_line=line.strip(),
-                        )
-                        self._symbol_index.setdefault(name, []).append(loc)
-                        symbol_count += 1
+
+            ts_symbols = _ts_extract_symbols(source, lang) if _TS_AVAILABLE else []
+            if ts_symbols:
+                for name, kind, line_no in ts_symbols:
+                    ctx = lines[line_no - 1].strip() if line_no <= len(lines) else ""
+                    loc = SymbolLocation(
+                        file_path=rel, line=line_no, column=0,
+                        symbol_name=name, kind=kind,
+                        context_line=ctx,
+                    )
+                    self._symbol_index.setdefault(name, []).append(loc)
+                    symbol_count += 1
+            else:
+                lang_patterns = _DEFINITION_PATTERNS.get(lang, all_patterns)
+                for i, line in enumerate(lines):
+                    for pattern, kind in lang_patterns:
+                        for m in re.finditer(pattern, line):
+                            name = m.group(1)
+                            loc = SymbolLocation(
+                                file_path=rel, line=i + 1, column=m.start(1),
+                                symbol_name=name, kind=kind,
+                                context_line=line.strip(),
+                            )
+                            self._symbol_index.setdefault(name, []).append(loc)
+                            symbol_count += 1
 
         self._index_built = True
         logger.info(
