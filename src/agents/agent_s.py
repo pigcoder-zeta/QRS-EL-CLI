@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+from src.agents.base_agent import BaseAgent
 from src.agents.agent_r import ReviewResult
 
 logger = logging.getLogger(__name__)
@@ -279,15 +280,9 @@ def _match_payloads(engine: str) -> list[str]:
 
 def _parse_poc_json(raw: str) -> dict:
     """从 LLM 原始输出提取 JSON，容忍 markdown 代码块包裹。"""
-    text = raw.strip()
-    if "```" in text:
-        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-        if m:
-            text = m.group(1).strip()
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # 降级：返回空结构
+        return BaseAgent.parse_json(raw)
+    except (ValueError, Exception):
         logger.warning("PoC JSON 解析失败，使用内置 Payload 降级输出。")
         return {}
 
@@ -297,7 +292,7 @@ def _parse_poc_json(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class AgentS:
+class AgentS(BaseAgent):
     """
     PoC 生成 Agent。
 
@@ -308,13 +303,10 @@ class AgentS:
         llm: LangChain LLM 实例。
     """
 
+    agent_name = "Agent-S"
+
     def __init__(self, llm: Optional[ChatOpenAI] = None) -> None:
-        self.llm: ChatOpenAI = llm or ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.3,
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-        )
-        self._parser = StrOutputParser()
+        super().__init__(llm=llm, temperature=0.3)
 
     def _invoke_llm(self, finding: ReviewResult, payloads: list[str]) -> dict:
         """调用 LLM 生成定制化 PoC。"""

@@ -31,6 +31,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+from src.agents.base_agent import BaseAgent, llm_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -587,8 +589,9 @@ def _parse_llm_json(raw: str) -> dict[str, Any]:
     Raises:
         ValueError: JSON 解析失败时抛出。
     """
-    # 去除可能存在的 ```json ... ``` 包裹
-    text = raw.strip()
+    text = raw.strip() if raw else ""
+    if not text:
+        raise ValueError("LLM 返回空响应")
     if "```" in text:
         import re
         m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
@@ -612,7 +615,11 @@ def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]
         ValueError: JSON 解析失败时抛出。
     """
     import re
-    text = raw.strip()
+    text = raw.strip() if raw else ""
+
+    if not text:
+        raise ValueError("LLM 返回空响应")
+
     if "```" in text:
         m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
         if m:
@@ -620,8 +627,24 @@ def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]
 
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"批量 JSON 解析失败: {exc}\n原始内容:\n{raw[:500]}") from exc
+    except json.JSONDecodeError:
+        bracket_start = text.find("[")
+        bracket_end = text.rfind("]")
+        if bracket_start != -1 and bracket_end > bracket_start:
+            try:
+                parsed = json.loads(text[bracket_start : bracket_end + 1])
+            except json.JSONDecodeError as exc2:
+                raise ValueError(f"批量 JSON 解析失败: {exc2}\n原始内容:\n{raw[:500]}") from exc2
+        else:
+            brace_start = text.find("{")
+            brace_end = text.rfind("}")
+            if brace_start != -1 and brace_end > brace_start:
+                try:
+                    parsed = [json.loads(text[brace_start : brace_end + 1])]
+                except json.JSONDecodeError as exc3:
+                    raise ValueError(f"批量 JSON 解析失败: {exc3}\n原始内容:\n{raw[:500]}") from exc3
+            else:
+                raise ValueError(f"批量 JSON 解析失败: 未找到 JSON 结构\n原始内容:\n{raw[:500]}")
 
     if isinstance(parsed, list):
         return parsed
@@ -635,7 +658,7 @@ def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]
 # ---------------------------------------------------------------------------
 
 
-class AgentR:
+class AgentR(BaseAgent):
     """
     漏洞语义审查 Agent。
 
@@ -653,6 +676,8 @@ class AgentR:
         enable_code_browser: 是否启用 CodeBrowser 智能上下文（默认开启）。
     """
 
+    agent_name = "Agent-R"
+
     def __init__(
         self,
         llm: Optional[ChatOpenAI] = None,
@@ -660,17 +685,15 @@ class AgentR:
         enable_code_browser: bool = True,
     ) -> None:
         _http_timeout = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
-        self.llm: ChatOpenAI = llm or ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+        super().__init__(
+            llm=llm,
             temperature=0.0,
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
             timeout=_http_timeout,
-            max_tokens=2048,
+            max_tokens=int(os.environ.get("AGENT_R_MAX_TOKENS", "4096")),
             max_retries=2,
         )
         self.context_lines = context_lines
         self.enable_code_browser = enable_code_browser
-        self._parser = StrOutputParser()
 
     def _invoke_llm(
         self,
@@ -696,49 +719,13 @@ class AgentR:
             code_lang=code_lang,
         )
         sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
-        chain = self.llm | self._parser
-        import threading as _th
         _timeout_sec = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
-        _result: list = [None]
-        _error: list = [None]
-
-        def _call() -> None:
-            try:
-                _result[0] = chain.invoke([
-                    SystemMessage(content=sys_prompt),
-                    HumanMessage(content=human_msg),
-                ])
-            except Exception as e:  # noqa: BLE001
-                _error[0] = e
-
-        _t = _th.Thread(target=_call, daemon=True)
-        _t.start()
-        _t0 = time.time()
-        _heartbeat_interval = 30
-        _waited = 0
-        while _t.is_alive() and _waited < _timeout_sec:
-            _t.join(timeout=_heartbeat_interval)
-            _waited = time.time() - _t0
-            if _t.is_alive():
-                logger.info(
-                    "[Agent-R] [WAIT] 等待 LLM 响应... %.0fs / %ds",
-                    _waited, _timeout_sec,
-                )
-                _flush_logs()
-        if _t.is_alive():
-            logger.warning(
-                "[Agent-R] [TIMEOUT] LLM 调用超时 (>%ds), 标记 UNCERTAIN", _timeout_sec,
-            )
-            _flush_logs()
-            raise TimeoutError(
-                f"[Agent-R] LLM 调用超时（>{_timeout_sec}s），标记 UNCERTAIN"
-            )
-        elapsed = time.time() - _t0
-        logger.info("[Agent-R] [OK] LLM 响应完成 (%.1fs)", elapsed)
+        raw = self.invoke_with_timeout(
+            [SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)],
+            timeout_sec=_timeout_sec,
+        )
         _flush_logs()
-        if _error[0]:
-            raise _error[0]
-        return _parse_llm_json(_result[0])
+        return self.parse_json(raw)
 
     def _invoke_llm_batch(
         self,
@@ -765,49 +752,23 @@ class AgentR:
             findings_block="\n".join(blocks),
         )
         sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
-        chain = self.llm | self._parser
-        import threading as _th
         _timeout_sec = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
-        _result: list = [None]
-        _error: list = [None]
-
-        def _call() -> None:
-            try:
-                _result[0] = chain.invoke([
-                    SystemMessage(content=sys_prompt),
-                    HumanMessage(content=human_msg),
-                ])
-            except Exception as e:  # noqa: BLE001
-                _error[0] = e
-
-        _t = _th.Thread(target=_call, daemon=True)
-        _t.start()
-        _t0 = time.time()
-        _heartbeat_interval = 30
-        _waited = 0
-        while _t.is_alive() and _waited < _timeout_sec:
-            _t.join(timeout=_heartbeat_interval)
-            _waited = time.time() - _t0
-            if _t.is_alive():
-                logger.info(
-                    "[Agent-R] [WAIT] 等待 LLM 响应... %.0fs / %ds",
-                    _waited, _timeout_sec,
-                )
-                _flush_logs()
-        if _t.is_alive():
-            logger.warning(
-                "[Agent-R] [TIMEOUT] LLM 调用超时 (>%ds), 跳过本批次", _timeout_sec,
-            )
-            _flush_logs()
-            raise TimeoutError(
-                f"[Agent-R] LLM 调用超时 (>{_timeout_sec}s), 跳过本批次"
-            )
-        elapsed = time.time() - _t0
-        logger.info("[Agent-R] [OK] LLM 批量响应完成 (%.1fs)", elapsed)
+        raw = self.invoke_with_timeout(
+            [SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)],
+            timeout_sec=_timeout_sec,
+        )
         _flush_logs()
-        if _error[0]:
-            raise _error[0]
-        return _parse_llm_json_array(_result[0], expected_count=len(findings_with_context))
+        return self.parse_json_array(raw, expected_count=len(findings_with_context))
+
+    @llm_retry(max_retries=3, backoff_factor=5.0)
+    def _invoke_llm_batch_with_retry(
+        self,
+        findings_with_context: list[SarifFinding],
+        language: str = "generic",
+        prompt_preset: str = "",
+    ) -> list[dict[str, Any]]:
+        """带重试的批量 LLM 调用（由 @llm_retry 装饰器控制重试策略）。"""
+        return self._invoke_llm_batch(findings_with_context, language=language, prompt_preset=prompt_preset)
 
     def _review_batch(
         self,
@@ -855,45 +816,47 @@ class AgentR:
                     window=self.context_lines,
                 )
 
-        # 批量 LLM 调用（含应用层重试）
-        _max_retries = 3
+        # 批量 LLM 调用（含应用层重试，失败降级为逐条审查）
         verdicts = None
-        _last_exc = None
-        for _attempt in range(1, _max_retries + 1):
-            try:
-                verdicts = self._invoke_llm_batch(batch_findings, language=language, prompt_preset=prompt_preset)
-                break
-            except (ValueError, TimeoutError, Exception) as exc:  # noqa: BLE001
-                _last_exc = exc
-                exc_str = str(exc)
-                is_retryable = any(kw in exc_str for kw in (
-                    "503", "502", "429", "DOCTYPE", "html", "超时",
-                    "Timeout", "JSON", "解析失败",
-                ))
-                if is_retryable and _attempt < _max_retries:
-                    _wait = _attempt * 5
-                    logger.warning(
-                        "[Agent-R] 第 %d/%d 次尝试失败 (%s), %ds 后重试...",
-                        _attempt, _max_retries, type(exc).__name__, _wait,
-                    )
-                    _flush_logs()
-                    time.sleep(_wait)
-                    continue
-                logger.warning(
-                    "[Agent-R] 批量审查失败（%d次尝试后放弃），标记 UNCERTAIN: %s",
-                    _attempt, exc,
-                )
-                break
+        try:
+            verdicts = self._invoke_llm_batch_with_retry(
+                batch_findings, language=language, prompt_preset=prompt_preset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Agent-R] 批量审查失败（重试用尽），降级为逐条审查: %s", exc,
+            )
+
         if verdicts is None:
-            verdicts = [
-                {
-                    "status": "uncertain",
-                    "confidence": 0.0,
-                    "engine_detected": "Unknown",
-                    "reasoning": f"LLM 异常({_max_retries}次重试): {_last_exc}",
-                    "sink_method": "",
-                }
-            ] * batch_size
+            logger.info(
+                "[Agent-R] 降级模式: 逐条审查 %d 条 findings (批次 %d~%d)",
+                batch_size, batch_start_idx + 1, batch_start_idx + batch_size,
+            )
+            _flush_logs()
+            verdicts = []
+            for _fi, _f in enumerate(batch_findings):
+                try:
+                    _single = self._invoke_llm(_f, language=language, prompt_preset=prompt_preset)
+                    verdicts.append(_single)
+                    logger.info(
+                        "[Agent-R] 逐条 #%d %s (%.0f%%)",
+                        batch_start_idx + _fi + 1,
+                        _single.get("status", "uncertain").upper(),
+                        _single.get("confidence", 0) * 100,
+                    )
+                except Exception as _single_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Agent-R] 逐条 #%d 也失败: %s",
+                        batch_start_idx + _fi + 1, _single_exc,
+                    )
+                    verdicts.append({
+                        "status": "uncertain",
+                        "confidence": 0.0,
+                        "engine_detected": "Unknown",
+                        "reasoning": f"LLM 异常(逐条降级也失败): {_single_exc}",
+                        "sink_method": "",
+                    })
+                _flush_logs()
 
         # 确保 verdicts 数量匹配
         while len(verdicts) < batch_size:

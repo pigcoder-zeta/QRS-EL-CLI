@@ -2,7 +2,7 @@
 二进制/固件安全：外部工具集成适配器。
 
 支持将 Ghidra / Binwalk / Radare2 / Cppcheck 等工具的输出
-转换为 SARIF 格式，对接 QRSE-X 的 --external-sarif 流水线。
+转换为 SARIF 格式，对接 Argus 的 --external-sarif 流水线。
 
 工作流程：
 1. firmware_extract()  — 调用 Binwalk 解包固件，提取文件系统
@@ -223,7 +223,7 @@ def parse_radare2_output(json_path: str) -> list[BinaryFinding]:
 
 def normalize_to_sarif(
     findings: list[BinaryFinding],
-    tool_name: str = "QRSE-X Binary Analyzer",
+    tool_name: str = "Argus Binary Analyzer",
 ) -> dict[str, Any]:
     """将二进制分析结果统一转换为 SARIF 格式。"""
     results = []

@@ -1,5 +1,5 @@
 """
-QRSE-X Web Dashboard — Flask 应用入口。
+Argus Web Dashboard — Flask 应用入口。
 
 启动方式:
     python -m src.web.app            # 默认 127.0.0.1:5000
@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _RESULTS_DIR = _PROJECT_ROOT / "data" / "results"
 _RULE_MEMORY_DIR = str(_PROJECT_ROOT / "data" / "rule_memory")
+
+_cached_codeql_version: str | None = None
+_cached_memory: RuleMemory | None = None
 
 app = Flask(
     __name__,
@@ -201,7 +204,10 @@ def api_templates_test():
 # ---------------------------------------------------------------------------
 
 def _get_memory() -> RuleMemory:
-    return RuleMemory(memory_dir=_RULE_MEMORY_DIR)
+    global _cached_memory
+    if _cached_memory is None:
+        _cached_memory = RuleMemory(memory_dir=_RULE_MEMORY_DIR)
+    return _cached_memory
 
 
 @app.route("/api/memory")
@@ -324,20 +330,23 @@ def api_memory_trust_stats():
 
 @app.route("/api/system/health")
 def api_system_health():
-    import subprocess
-    codeql_version = "unknown"
-    try:
-        r = subprocess.run(
-            ["codeql", "version"], capture_output=True, text=True, timeout=10
-        )
-        if r.returncode == 0:
-            codeql_version = r.stdout.strip().splitlines()[0]
-    except Exception:
-        pass
+    global _cached_codeql_version
+    if _cached_codeql_version is None:
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["codeql", "version"], capture_output=True, text=True, timeout=10
+            )
+            if r.returncode == 0:
+                _cached_codeql_version = r.stdout.strip().splitlines()[0]
+            else:
+                _cached_codeql_version = "unknown"
+        except Exception:
+            _cached_codeql_version = "unknown"
 
     mem = _get_memory()
     return jsonify({
-        "codeql_version": codeql_version,
+        "codeql_version": _cached_codeql_version,
         "template_count": len(_ALL_TEMPLATES),
         "memory_count": mem.count(),
         "memory_backend": mem.get_backend_name(),
@@ -542,14 +551,14 @@ def api_codebase_types():
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="QRSE-X Web Dashboard")
+    parser = argparse.ArgumentParser(description="Argus Web Dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    logger.info("QRSE-X Dashboard starting at http://%s:%d", args.host, args.port)
+    logger.info("Argus Dashboard starting at http://%s:%d", args.host, args.port)
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
 
 

@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from src.agents.base_agent import BaseAgent
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -222,7 +224,7 @@ _FIRMWARE_INDICATORS = [
 # ---------------------------------------------------------------------------
 
 
-class AgentT:
+class AgentT(BaseAgent):
     """
     代码库分类 Agent。
 
@@ -231,21 +233,13 @@ class AgentT:
       2. LLM 兜底（规则引擎不确定时调用）
     """
 
+    agent_name = "Agent-T"
+
     def __init__(self, llm: Any = None) -> None:
-        self._llm = llm
+        super().__init__(llm=llm, temperature=0.0, timeout=60, max_tokens=512)
 
     def _get_llm(self) -> Any:
-        if self._llm:
-            return self._llm
-        from langchain_openai import ChatOpenAI
-        self._llm = ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.0,
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-            timeout=60,
-            max_tokens=512,
-        )
-        return self._llm
+        return self.llm
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -440,18 +434,12 @@ class AgentT:
 {{"codebase_type": "类型名", "confidence": 0.0~1.0, "reasoning": "判断理由"}}
 """
         try:
-            llm = self._get_llm()
-            chain = llm | StrOutputParser()
+            chain = self.llm | self._parser
             raw = chain.invoke([
                 SystemMessage(content="你是代码库分类专家。只输出 JSON。"),
                 HumanMessage(content=prompt),
             ])
-            text = raw.strip()
-            if "```" in text:
-                m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-                if m:
-                    text = m.group(1).strip()
-            result = json.loads(text)
+            result = self.parse_json(raw)
             ctype = result.get("codebase_type", "web_app")
             if ctype not in CODEBASE_TYPES:
                 ctype = "web_app"

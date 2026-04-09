@@ -183,7 +183,7 @@ class ScanManager:
 # ---------------------------------------------------------------------------
 
 _ABLATION_VARIANTS = [
-    {"name": "full",              "label": "Full QRSE-X",       "enable_code_browser": True,  "prompt_preset": "",        "skip_agent_r": False},
+    {"name": "full",              "label": "Full Argus",       "enable_code_browser": True,  "prompt_preset": "",        "skip_agent_r": False},
     {"name": "no_agent_r",        "label": "w/o Agent-R",       "enable_code_browser": True,  "prompt_preset": "",        "skip_agent_r": True},
     {"name": "no_codebrowser",    "label": "w/o CodeBrowser",   "enable_code_browser": False, "prompt_preset": "",        "skip_agent_r": False},
     {"name": "no_rag",            "label": "w/o RAG",           "enable_code_browser": True,  "prompt_preset": "",        "skip_agent_r": "copy_full"},
@@ -265,7 +265,7 @@ def _patch_scan_manager():
             language = cfg.get("language", "java")
             benchmark_type = cfg.get("benchmark_type", "owasp")
             workers = int(cfg.get("workers", 4))
-            batch = int(cfg.get("batch", 10))
+            batch = int(cfg.get("batch", 5))
 
             results_dir = _PROJECT_ROOT / "data" / "results"
             results_dir.mkdir(parents=True, exist_ok=True)

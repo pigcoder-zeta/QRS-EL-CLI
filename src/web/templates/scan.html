@@ -1,11 +1,11 @@
 {% extends "layout.html" %}
-{% block title %}QRSE-X - 扫描{% endblock %}
+{% block title %}Argus - 扫描{% endblock %}
 
 {% block content %}
-<div class="mb-6 flex items-center justify-between">
+<div class="mb-8 flex items-center justify-between">
   <div>
-    <h2 class="text-2xl font-bold">扫描配置</h2>
-    <p class="text-gray-500 text-sm mt-1">配置扫描参数并实时查看检测进度</p>
+    <h2 class="text-3xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 tracking-tight">扫描配置</h2>
+    <p class="text-gray-400 text-sm mt-1.5 font-medium">配置扫描参数并实时查看检测进度</p>
   </div>
   <div class="flex gap-2 print:hidden">
     <span class="mode-chip mode-a">A 静态</span>
@@ -15,9 +15,9 @@
 </div>
 
 <!-- Mode C: Quick presets -->
-<div class="mb-4">
-  <div class="text-xs text-gray-500 mb-2 font-semibold">快速预设 <span class="mode-chip mode-c ml-1">交互</span></div>
-  <div class="flex gap-2 flex-wrap">
+<div class="mb-6">
+  <div class="text-xs text-gray-400 mb-3 font-semibold uppercase tracking-wider">快速预设 <span class="mode-chip mode-c ml-1">交互</span></div>
+  <div class="flex gap-3 flex-wrap">
     <button class="preset-card" onclick="applyPreset('java-all')"><span class="text-sm text-brand-500">Java 全量扫描</span><br/><span class="text-xs text-gray-600">14 种漏洞 × 并行</span></button>
     <button class="preset-card" onclick="applyPreset('java-injection')"><span class="text-sm text-yellow-400">Java 注入类</span><br/><span class="text-xs text-gray-600">SQL + CMD + EL + OGNL</span></button>
     <button class="preset-card" onclick="applyPreset('python-ssti')"><span class="text-sm text-green-400">Python SSTI</span><br/><span class="text-xs text-gray-600">Jinja2 + Mako</span></button>
@@ -519,7 +519,7 @@ function toggleYamlPreview() {
 
 function updateYamlPreview() {
   const c = getConfig();
-  let yaml = '# QRSE-X 扫描配置\n';
+  let yaml = '# Argus 扫描配置\n';
   if (c.github_url) yaml += `github_url: "${c.github_url}"\n`;
   if (c.source_dir) yaml += `source_dir: "${c.source_dir}"\n`;
   yaml += `language: ${c.language}\n`;

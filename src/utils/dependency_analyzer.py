@@ -389,7 +389,7 @@ def to_sarif(
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": "QRSE-X Supply Chain Analyzer",
+                    "name": "Argus Supply Chain Analyzer",
                     "version": "2.3",
                 }
             },

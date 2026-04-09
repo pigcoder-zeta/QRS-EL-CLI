@@ -10,7 +10,7 @@ JSON schema 概览：
 {
   "meta": {
     "generated_at": "ISO8601",
-    "tool": "QRSE-X",
+    "tool": "Argus",
     "version": "2.4.0",
     "language": "java",
     "total_runs": N,
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TOOL_NAME = "QRSE-X"
+_TOOL_NAME = "Argus"
 _TOOL_VERSION = "2.4.0"
 
 
@@ -206,7 +206,7 @@ def export_summary_text(states: "list[PipelineState]") -> str:
     """
     lines: list[str] = [
         "=" * 60,
-        f"  QRSE-X 扫描摘要  ({datetime.now().strftime('%Y-%m-%d %H:%M')})",
+        f"  Argus 扫描摘要  ({datetime.now().strftime('%Y-%m-%d %H:%M')})",
         "=" * 60,
     ]
     for state in states:

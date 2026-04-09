@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+from src.agents.base_agent import BaseAgent
 from src.utils.codeql_runner import CodeQLRunner
 from src.utils.ql_template_library import QLTemplateLibrary
 from src.utils import vuln_catalog
@@ -848,7 +849,7 @@ def _extract_ql_code(raw_output: str) -> str:
 # Agent-Q 主类
 # ---------------------------------------------------------------------------
 
-class AgentQ:
+class AgentQ(BaseAgent):
     """
     CodeQL 规则自动合成 Agent，内置自修复循环。
 
@@ -859,6 +860,8 @@ class AgentQ:
         max_retries: 自修复循环的最大重试次数。
     """
 
+    agent_name = "Agent-Q"
+
     def __init__(
         self,
         llm: Optional[ChatOpenAI] = None,
@@ -866,17 +869,11 @@ class AgentQ:
         output_dir: str = "data/queries",
         max_retries: int = MAX_RETRIES,
     ) -> None:
-        self.llm: ChatOpenAI = llm or ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.2,
-            # 支持第三方 OpenAI 兼容接口（如硅基流动、月之暗面等）
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-        )
+        super().__init__(llm=llm, temperature=0.2)
         self.runner: CodeQLRunner = runner or CodeQLRunner()
         self.output_dir: Path = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_retries: int = max_retries
-        self._parser = StrOutputParser()
 
     # ------------------------------------------------------------------
     # 内部辅助

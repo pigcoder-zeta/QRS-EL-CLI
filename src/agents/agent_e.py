@@ -38,6 +38,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+from src.agents.base_agent import BaseAgent
 from src.agents.agent_s import PoCResult
 from src.utils.docker_manager import ContainerInfo, DockerManager
 
@@ -242,7 +243,7 @@ _VERIFY_TEMPLATE = """\
 # ---------------------------------------------------------------------------
 
 
-class AgentE:
+class AgentE(BaseAgent):
     """
     动态沙箱验证 Agent。
 
@@ -258,6 +259,8 @@ class AgentE:
         cleanup_image:   验证后是否删除 Docker 镜像（默认 True）。
     """
 
+    agent_name = "Agent-E"
+
     def __init__(
         self,
         llm: Optional[ChatOpenAI] = None,
@@ -265,12 +268,7 @@ class AgentE:
         enable_docker: bool = True,
         cleanup_image: bool = True,
     ) -> None:
-        self.llm: ChatOpenAI = llm or ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.0,    # 验证分析需要确定性
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-        )
-        self._parser      = StrOutputParser()
+        super().__init__(llm=llm, temperature=0.0)
         self.target_host  = target_host
         self.enable_docker = enable_docker
         self.cleanup_image = cleanup_image
@@ -539,7 +537,6 @@ class AgentE:
         response_body: str,
     ) -> dict:
         """调用 LLM 分析 HTTP 响应，判断 PoC 是否命中。"""
-        import json as _json
         human_msg = _VERIFY_TEMPLATE.format(
             vuln_type=vuln_type,
             method=method,
@@ -555,13 +552,7 @@ class AgentE:
                 SystemMessage(content=_SYSTEM_PROMPT_E),
                 HumanMessage(content=human_msg),
             ])
-            # 提取 JSON
-            text = raw.strip()
-            if "```" in text:
-                m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-                if m:
-                    text = m.group(1).strip()
-            return _json.loads(text)
+            return self.parse_json(raw)
         except Exception as exc:
             logger.debug("[Agent-E] LLM 分析失败: %s", exc)
             return {"confirmed": False, "confidence": 0.0, "evidence": "", "reason": str(exc)}

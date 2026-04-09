@@ -1,11 +1,11 @@
 {% extends "layout.html" %}
-{% block title %}QRSE-X - 仪表盘{% endblock %}
+{% block title %}Argus - 仪表盘{% endblock %}
 
 {% block content %}
-<div class="mb-6 flex items-center justify-between">
+<div class="mb-8 flex items-center justify-between">
   <div>
-    <h2 class="text-2xl font-bold">仪表盘</h2>
-    <p class="text-gray-500 text-sm mt-1">QRSE-X 多 Agent 协同自动化漏洞检测系统</p>
+    <h2 class="text-3xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 tracking-tight">仪表盘</h2>
+    <p class="text-gray-400 text-sm mt-1.5 font-medium">Argus 多 Agent 协同自动化漏洞检测系统</p>
   </div>
   <div class="flex items-center gap-3">
     <!-- Mode A: print view -->
@@ -30,36 +30,41 @@
 
 <!-- Stat cards -->
 <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6" id="stat-cards">
-  <div class="stat-card">
-    <div class="stat-value text-brand-500" id="stat-scans">-</div>
-    <div class="stat-label">历史扫描</div>
+  <div class="stat-card relative overflow-hidden group">
+    <div class="absolute inset-0 bg-gradient-to-br from-brand-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+    <div class="stat-value text-brand-500 relative z-10" id="stat-scans">-</div>
+    <div class="stat-label relative z-10">历史扫描</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-value text-red-400" id="stat-vulns">-</div>
-    <div class="stat-label">发现漏洞</div>
+  <div class="stat-card relative overflow-hidden group">
+    <div class="absolute inset-0 bg-gradient-to-br from-red-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+    <div class="stat-value text-red-400 relative z-10" id="stat-vulns">-</div>
+    <div class="stat-label relative z-10">发现漏洞</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-value text-green-400" id="stat-templates">-</div>
-    <div class="stat-label">黄金模板</div>
+  <div class="stat-card relative overflow-hidden group">
+    <div class="absolute inset-0 bg-gradient-to-br from-green-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+    <div class="stat-value text-green-400 relative z-10" id="stat-templates">-</div>
+    <div class="stat-label relative z-10">黄金模板</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-value text-yellow-400" id="stat-memory">-</div>
-    <div class="stat-label">规则记忆</div>
+  <div class="stat-card relative overflow-hidden group">
+    <div class="absolute inset-0 bg-gradient-to-br from-yellow-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+    <div class="stat-value text-yellow-400 relative z-10" id="stat-memory">-</div>
+    <div class="stat-label relative z-10">规则记忆</div>
   </div>
-  <div class="stat-card">
-    <div class="stat-value text-purple-400" id="stat-catalog">-</div>
-    <div class="stat-label">漏洞目录</div>
+  <div class="stat-card relative overflow-hidden group">
+    <div class="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+    <div class="stat-value text-purple-400 relative z-10" id="stat-catalog">-</div>
+    <div class="stat-label relative z-10">漏洞目录</div>
   </div>
 </div>
 
 <!-- Quick actions -->
-<div class="flex gap-3 mb-6 print:hidden">
-  <a href="/scan" class="btn btn-primary">
+<div class="flex gap-4 mb-8 print:hidden">
+  <a href="/scan" class="btn btn-primary shadow-lg shadow-blue-500/20">
     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
     新建扫描
   </a>
-  <a href="/templates" class="btn btn-secondary">查看模板库</a>
-  <a href="/memory" class="btn btn-secondary">管理记忆库</a>
+  <a href="/templates" class="btn btn-secondary shadow-md hover:shadow-lg transition-shadow">查看模板库</a>
+  <a href="/memory" class="btn btn-secondary shadow-md hover:shadow-lg transition-shadow">管理记忆库</a>
 </div>
 
 <!-- Mode C: Interactive charts row -->
@@ -70,7 +75,9 @@
       <span class="font-semibold text-sm">漏洞类型分布 <span class="mode-chip mode-c ml-2">交互</span></span>
     </div>
     <div class="card-body flex items-center justify-center" style="min-height:260px">
-      <canvas id="chart-vuln-dist" class="max-w-[280px]"></canvas>
+      <div style="width: 100%; max-width: 320px; margin: 0 auto;">
+        <canvas id="chart-vuln-dist"></canvas>
+      </div>
       <div class="text-gray-600 text-sm hidden" id="chart-vuln-empty">暂无数据</div>
     </div>
   </div>
@@ -170,13 +177,81 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+  @keyframes shimmer {
+    0% { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+  }
+  .skeleton {
+    background: linear-gradient(90deg, rgba(31,41,55,0.4) 25%, rgba(55,65,81,0.5) 37%, rgba(31,41,55,0.4) 63%);
+    background-size: 800px 100%;
+    animation: shimmer 1.5s infinite ease-in-out;
+    border-radius: 4px;
+    display: inline-block;
+  }
+  .skeleton-text { width: 3ch; height: 1.75rem; vertical-align: middle; }
+  .fade-in { animation: fadeIn 0.4s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+</style>
 <script>
 let allResults = [];
 let sortKey = 'time', sortDir = -1;
 let trendChart = null, vulnChart = null, langChart = null;
 const REFRESH_MS = 30000;
 
-document.addEventListener('DOMContentLoaded', () => { loadAll(); setInterval(loadAll, REFRESH_MS); });
+document.addEventListener('DOMContentLoaded', () => {
+  showSkeletons();
+  loadProgressively();
+  setInterval(loadAll, REFRESH_MS);
+});
+
+function showSkeletons() {
+  ['stat-scans','stat-vulns','stat-templates','stat-memory','stat-catalog'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<span class="skeleton skeleton-text"></span>';
+  });
+  ['sys-codeql','sys-backend','sys-tpl-count','sys-mem-count'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<span class="skeleton" style="width:6ch;height:0.85rem"></span>';
+  });
+}
+
+async function loadProgressively() {
+  const fast1 = fetch('/api/vuln-catalog').then(r => r.json()).catch(() => []);
+  const fast2 = fetch('/api/templates').then(r => r.json()).catch(() => ({ templates: [] }));
+
+  const catalog = await fast1;
+  animateValue('stat-catalog', Array.isArray(catalog) ? catalog.length : 0);
+
+  const tplData = await fast2;
+
+  const [resultsRes, healthRes, memRes] = await Promise.all([
+    fetch('/api/results'), fetch('/api/system/health'), fetch('/api/memory'),
+  ]);
+  allResults = await resultsRes.json();
+  const health = await healthRes.json();
+  const mem = await memRes.json();
+
+  animateValue('stat-scans', allResults.length);
+  const totalVulns = allResults.reduce((s, r) => s + (r.total_vulnerabilities || 0), 0);
+  animateValue('stat-vulns', totalVulns);
+  animateValue('stat-templates', health.template_count);
+  animateValue('stat-memory', mem.total || 0);
+  document.getElementById('scan-count-badge').textContent = allResults.length;
+
+  document.getElementById('sys-codeql').textContent = health.codeql_version;
+  document.getElementById('sys-backend').textContent = mem.backend || '-';
+  document.getElementById('sys-tpl-count').textContent = health.template_count;
+  document.getElementById('sys-mem-count').textContent = `${mem.total || 0} 条 (${mem.backend || '-'})`;
+
+  renderScansTable();
+
+  requestAnimationFrame(() => {
+    renderVulnDistChart();
+    renderTrendChart(7);
+    renderLangChartWithData(health, tplData);
+  });
+}
 
 async function loadAll() {
   const [resultsRes, healthRes, memRes, catalogRes] = await Promise.all([
@@ -187,7 +262,6 @@ async function loadAll() {
   const mem = await memRes.json();
   const catalog = await catalogRes.json().catch(() => []);
 
-  // Stats
   document.getElementById('stat-scans').textContent = allResults.length;
   const totalVulns = allResults.reduce((s, r) => s + (r.total_vulnerabilities || 0), 0);
   document.getElementById('stat-vulns').textContent = totalVulns;
@@ -196,7 +270,6 @@ async function loadAll() {
   document.getElementById('stat-catalog').textContent = Array.isArray(catalog) ? catalog.length : 0;
   document.getElementById('scan-count-badge').textContent = allResults.length;
 
-  // System
   document.getElementById('sys-codeql').textContent = health.codeql_version;
   document.getElementById('sys-backend').textContent = mem.backend || '-';
   document.getElementById('sys-tpl-count').textContent = health.template_count;
@@ -205,7 +278,23 @@ async function loadAll() {
   renderScansTable();
   renderVulnDistChart();
   renderTrendChart(7);
-  renderLangChart(health);
+}
+
+function animateValue(elId, target) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const duration = 600;
+  const start = performance.now();
+  target = parseInt(target) || 0;
+  el.classList.add('fade-in');
+  if (target === 0) { el.textContent = '0'; return; }
+  function step(now) {
+    const progress = Math.min((now - start) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.textContent = Math.round(eased * target);
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
 }
 
 // --- Mode C: Interactive table with sort & filter ---
@@ -266,9 +355,20 @@ function renderVulnDistChart() {
   if (vulnChart) vulnChart.destroy();
   vulnChart = new Chart(ctx, {
     type: 'doughnut',
-    data: { labels, datasets: [{ data: values, backgroundColor: colors.slice(0,labels.length), borderWidth: 0 }] },
+    data: { labels, datasets: [{ data: values, backgroundColor: colors.slice(0,labels.length), borderWidth: 2, borderColor: '#111827', hoverOffset: 4 }] },
     options: {
       responsive: true,
+      maintainAspectRatio: true,
+      aspectRatio: 1.2,
+      cutout: '70%',
+      layout: { padding: 10 },
+      elements: {
+        arc: {
+          borderWidth: 2,
+          borderColor: '#111827',
+          borderRadius: 4
+        }
+      },
       onClick: (_, els) => {
         if (els.length > 0) {
           const type = labels[els[0].index];
@@ -341,31 +441,29 @@ function renderTrendChart(days) {
 }
 
 // --- Mode C: Language coverage radar ---
-function renderLangChart(health) {
+function renderLangChartWithData(health, tplData) {
   const langNames = ['Java','Python','JavaScript','Go','C#','C++','Solidity'];
   const langKeys = ['java','python','javascript','go','csharp','cpp','solidity'];
   const tplCount = {};
-  fetch('/api/templates').then(r=>r.json()).then(data => {
-    (data.templates||[]).forEach(t => { tplCount[t.language] = (tplCount[t.language]||0)+1; });
-    const scanCount = {};
-    allResults.forEach(r => { if(r.language) scanCount[r.language] = (scanCount[r.language]||0)+1; });
-    const ctx = document.getElementById('chart-lang');
-    if (langChart) langChart.destroy();
-    langChart = new Chart(ctx, {
-      type: 'radar',
-      data: {
-        labels: langNames,
-        datasets: [
-          { label: '模板数', data: langKeys.map(k => tplCount[k]||0), borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', pointBackgroundColor: '#4ade80' },
-          { label: '扫描数', data: langKeys.map(k => scanCount[k]||0), borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.1)', pointBackgroundColor: '#60a5fa' },
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        scales: { r: { beginAtZero: true, ticks: { color: '#6b7280', stepSize:2 }, grid: { color: 'rgba(55,65,81,0.4)' }, pointLabels: { color: '#d1d5db', font:{size:11} } } },
-        plugins: { legend: { labels: { color: '#9ca3af', usePointStyle:true, pointStyleWidth:8 } } }
-      }
-    });
+  (tplData.templates||[]).forEach(t => { tplCount[t.language] = (tplCount[t.language]||0)+1; });
+  const scanCount = {};
+  allResults.forEach(r => { if(r.language) scanCount[r.language] = (scanCount[r.language]||0)+1; });
+  const ctx = document.getElementById('chart-lang');
+  if (langChart) langChart.destroy();
+  langChart = new Chart(ctx, {
+    type: 'radar',
+    data: {
+      labels: langNames,
+      datasets: [
+        { label: '模板数', data: langKeys.map(k => tplCount[k]||0), borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', pointBackgroundColor: '#4ade80' },
+        { label: '扫描数', data: langKeys.map(k => scanCount[k]||0), borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.1)', pointBackgroundColor: '#60a5fa' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { r: { beginAtZero: true, ticks: { color: '#6b7280', stepSize:2 }, grid: { color: 'rgba(55,65,81,0.4)' }, pointLabels: { color: '#d1d5db', font:{size:11} } } },
+      plugins: { legend: { labels: { color: '#9ca3af', usePointStyle:true, pointStyleWidth:8 } } }
+    }
   });
 }
 </script>

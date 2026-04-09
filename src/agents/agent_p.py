@@ -1,5 +1,5 @@
 """
-Agent-P（Planner Agent）：QRSE-X 元决策层。
+Agent-P（Planner Agent）：Argus 元决策层。
 
 职责：
 1. 侦察（Recon）  — 自动分析目标仓库的语言、框架、依赖、入口点
@@ -23,6 +23,8 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
+
+from src.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +182,7 @@ _LANG_EXTENSIONS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT_PLANNER = """\
-你是 QRSE-X 安全扫描系统的规划 Agent（Agent-P）。
+你是 Argus 安全扫描系统的规划 Agent（Agent-P）。
 你的职责是根据目标仓库的侦察报告，从漏洞目录中选择最适合的漏洞类型进行扫描。
 
 你必须输出严格的 JSON 格式，不要附带 markdown 代码块标记或任何解释文字。
@@ -239,9 +241,9 @@ _EVALUATE_TEMPLATE = """\
 # ---------------------------------------------------------------------------
 
 
-class AgentP:
+class AgentP(BaseAgent):
     """
-    Planner Agent：QRSE-X 元决策层。
+    Planner Agent：Argus 元决策层。
 
     Args:
         llm: LangChain LLM 实例。
@@ -249,21 +251,43 @@ class AgentP:
         rule_memory: RuleMemory 实例（可选，用于历史查询）。
     """
 
+    agent_name = "Agent-P"
+
     def __init__(
         self,
         llm: Optional[ChatOpenAI] = None,
         repo_manager: Any = None,
         rule_memory: Any = None,
+        trace_dir: str = "data/results",
     ) -> None:
-        self.llm = llm or ChatOpenAI(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            temperature=0.2,
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
-            timeout=120,
-        )
-        self._parser = StrOutputParser()
+        super().__init__(llm=llm, temperature=0.2, timeout=120)
         self.repo_manager = repo_manager
         self.rule_memory = rule_memory
+        self._trace_dir = trace_dir
+        self._trace_records: list[dict] = []
+
+    def _record_trace(self, phase: str, input_text: str, output_text: str) -> None:
+        """记录 LLM 交互（用于决策追溯）。"""
+        import time as _t
+        self._trace_records.append({
+            "phase": phase,
+            "timestamp": _t.time(),
+            "input": input_text[:2000],
+            "output": output_text[:2000],
+        })
+
+    def save_trace(self, run_id: str = "") -> Optional[str]:
+        """将决策追溯记录保存到 JSON 文件。"""
+        if not self._trace_records:
+            return None
+        trace_path = Path(self._trace_dir) / f"agent_p_trace_{run_id or 'unknown'}.json"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(
+            json.dumps(self._trace_records, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("[Agent-P] 决策追溯已保存: %s (%d 条记录)", trace_path, len(self._trace_records))
+        return str(trace_path)
 
     # -----------------------------------------------------------------------
     # Phase 1: 侦察
@@ -334,13 +358,18 @@ class AgentP:
         )
         return report
 
+    _MAX_SCAN_FILES = 2000
+    _LOC_WORKERS = 8
+
     def _analyze_languages(
         self, root: Path
     ) -> tuple[dict[str, float], int, int]:
-        """统计仓库语言分布。"""
+        """统计仓库语言分布（采样 + 并行 I/O 优化）。"""
+        from concurrent.futures import ThreadPoolExecutor
+
         ext_count: Counter[str] = Counter()
-        total_loc = 0
         file_count = 0
+        sampled_files: list[Path] = []
         skip_dirs = {
             "node_modules", ".git", "__pycache__", "vendor", "build",
             "dist", "target", ".gradle", "bin", "obj",
@@ -355,12 +384,21 @@ class AgentP:
             if ext:
                 ext_count[ext] += 1
                 file_count += 1
-                try:
-                    total_loc += sum(
-                        1 for _ in f.open("r", encoding="utf-8", errors="ignore")
-                    )
-                except Exception:
-                    pass
+                if len(sampled_files) < self._MAX_SCAN_FILES:
+                    sampled_files.append(f)
+
+        def _count_lines(fp: Path) -> int:
+            try:
+                return sum(1 for _ in fp.open("r", encoding="utf-8", errors="ignore"))
+            except Exception:
+                return 0
+
+        total_loc = 0
+        with ThreadPoolExecutor(max_workers=self._LOC_WORKERS) as pool:
+            total_loc = sum(pool.map(_count_lines, sampled_files))
+
+        if file_count > self._MAX_SCAN_FILES:
+            total_loc = int(total_loc * file_count / self._MAX_SCAN_FILES)
 
         lang_lines: Counter[str] = Counter()
         for lang, exts in _LANG_EXTENSIONS.items():
@@ -540,6 +578,7 @@ class AgentP:
             SystemMessage(content=_SYSTEM_PROMPT_PLANNER),
             HumanMessage(content=human_msg),
         ])
+        self._record_trace("plan", human_msg, raw)
 
         plan = self._parse_plan_response(raw, recon_report, codebase_profile)
         logger.info(
@@ -737,6 +776,7 @@ class AgentP:
                 SystemMessage(content=_SYSTEM_PROMPT_PLANNER),
                 HumanMessage(content=human_msg),
             ])
+            self._record_trace("evaluate", human_msg, raw)
             eval_data = self._parse_evaluate_response(raw, scan_plan)
         except Exception as exc:
             logger.warning("[Agent-P] LLM 评估失败，使用规则化决策: %s", exc)

@@ -1,5 +1,5 @@
 """
-Coordinator：QRSE-X 系统的工作流调度中心（全功能版）。
+Coordinator：Argus 系统的工作流调度中心（全功能版）。
 
 Pipeline 阶段：
   Phase 0: （GitHub 模式）克隆仓库 + 探测构建命令
@@ -24,7 +24,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from src.agents.agent_e import AgentE, VerificationResult, VerificationStatus
 from src.agents.agent_q import AgentQ
@@ -155,6 +155,65 @@ class PipelineState:
     def success(self) -> bool:
         return self.error is None
 
+    # ------------------------------------------------------------------
+    # Checkpoint 持久化
+    # ------------------------------------------------------------------
+
+    def save_checkpoint(self, checkpoint_dir: str = "data/checkpoints") -> str:
+        """将当前状态序列化到 JSON 文件，支持断点续跑。"""
+        import json as _json
+
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        path = Path(checkpoint_dir) / f"checkpoint_{self.run_id}.json"
+        data = {
+            "run_id": self.run_id,
+            "vuln_type": self.vuln_type,
+            "cloned_repo_path": self.cloned_repo_path,
+            "source_dir": self.source_dir,
+            "commit_hash": self.commit_hash,
+            "build_command": self.build_command,
+            "detected_frameworks": list(self.detected_frameworks),
+            "db_path": self.db_path,
+            "db_from_cache": self.db_from_cache,
+            "query_path": self.query_path,
+            "sarif_path": self.sarif_path,
+            "completed_phases": self.completed_phases,
+            "error": self.error,
+            "patch_commit": self.patch_commit,
+            "hotspot_functions": self.hotspot_functions,
+            "scan_mode": self.scan_mode,
+        }
+        path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.debug("[Checkpoint] 已保存: %s", path)
+        return str(path)
+
+    @classmethod
+    def load_checkpoint(cls, path: str) -> "PipelineState":
+        """从 JSON 文件恢复 Pipeline 状态。"""
+        import json as _json
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8"))
+        state = cls(
+            run_id=data["run_id"],
+            vuln_type=data.get("vuln_type", ""),
+        )
+        state.cloned_repo_path = data.get("cloned_repo_path")
+        state.source_dir = data.get("source_dir")
+        state.commit_hash = data.get("commit_hash", "")
+        state.build_command = data.get("build_command", "")
+        state.detected_frameworks = set(data.get("detected_frameworks", []))
+        state.db_path = data.get("db_path")
+        state.db_from_cache = data.get("db_from_cache", False)
+        state.query_path = data.get("query_path")
+        state.sarif_path = data.get("sarif_path")
+        state.completed_phases = data.get("completed_phases", [])
+        state.error = data.get("error")
+        state.patch_commit = data.get("patch_commit", "")
+        state.hotspot_functions = data.get("hotspot_functions", {})
+        state.scan_mode = data.get("scan_mode", "full")
+        logger.info("[Checkpoint] 已恢复: %s (已完成阶段: %s)", path, state.completed_phases)
+        return state
+
 
 # ---------------------------------------------------------------------------
 # Coordinator 主类
@@ -163,14 +222,23 @@ class PipelineState:
 
 class Coordinator:
     """
-    QRSE-X 工作流协调器（全功能版）。
+    Argus 工作流协调器（全功能版）。
 
     支持单次扫描（run）和多漏洞并行扫描（run_parallel）。
     """
 
-    # CodeQL analyze 命令独占数据库 IMB 缓存，同一时刻只能有一个线程执行 analyze。
-    # 此类级锁确保并行扫描时 Phase 3 串行化，避免 OverlappingFileLockException。
-    _analyze_lock: threading.Lock = threading.Lock()
+    # CodeQL analyze 命令对同一数据库的 IMB 缓存不支持并发访问。
+    # 使用 per-database 锁替代全局锁，不同数据库的 analyze 可以并行执行。
+    _analyze_locks: dict[str, threading.Lock] = {}
+    _analyze_locks_guard: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _get_db_lock(cls, db_path: str) -> threading.Lock:
+        """获取指定数据库路径的专属锁。"""
+        with cls._analyze_locks_guard:
+            if db_path not in cls._analyze_locks:
+                cls._analyze_locks[db_path] = threading.Lock()
+            return cls._analyze_locks[db_path]
 
     def __init__(
         self,
@@ -178,8 +246,11 @@ class Coordinator:
         agent_q: Optional[AgentQ] = None,
         agent_r: Optional[AgentR] = None,
         agent_s: Optional[AgentS] = None,
+        agent_e: Optional[AgentE] = None,
         runner: Optional[CodeQLRunner] = None,
         repo_manager: Optional[GithubRepoManager] = None,
+        rule_memory: Optional[RuleMemory] = None,
+        _skip_rule_memory_init: bool = False,
     ) -> None:
         self.config = config
         self.runner = runner or CodeQLRunner(
@@ -195,17 +266,20 @@ class Coordinator:
             context_lines=config.agent_r_context_lines,
         )
         self.agent_s = agent_s or AgentS()
-        self.agent_e = AgentE(
+        self.agent_e = agent_e or AgentE(
             target_host=config.agent_e_host,
             enable_docker=config.enable_agent_e,
         )
         self.repo_manager = repo_manager or GithubRepoManager()
         self.db_cache = DatabaseCache(db_base_dir=config.db_base_dir)
-        self.rule_memory = (
-            RuleMemory(memory_dir=config.rule_memory_dir)
-            if config.enable_rule_memory
-            else None
-        )
+        if _skip_rule_memory_init:
+            self.rule_memory = rule_memory
+        else:
+            self.rule_memory = rule_memory or (
+                RuleMemory(memory_dir=config.rule_memory_dir)
+                if config.enable_rule_memory
+                else None
+            )
         # 进度追踪：run() 开始后立即设置，外部可安全轮询 completed_phases
         self.active_state: Optional[PipelineState] = None
 
@@ -526,8 +600,8 @@ class Coordinator:
         )
         logger.info("[Phase 3] 运行 CodeQL 扫描，输出: %s", sarif_path)
 
-        # CodeQL IMB 缓存不支持并发访问，加锁确保同一时刻只有一个 analyze 运行
-        with Coordinator._analyze_lock:
+        # 同一数据库的 analyze 互斥，不同数据库可并行
+        with Coordinator._get_db_lock(state.db_path):
             success = self.runner.analyze(
                 db_path=state.db_path,
                 query_path=state.query_path,
@@ -796,62 +870,85 @@ class Coordinator:
     # 公开接口：单次扫描
     # ------------------------------------------------------------------
 
-    def run(self) -> PipelineState:
+    def run(
+        self,
+        checkpoint_path: Optional[str] = None,
+    ) -> PipelineState:
         """
         执行完整 Pipeline 并返回最终状态。
+
+        Args:
+            checkpoint_path: 若提供，则从 checkpoint 恢复，跳过已完成的阶段。
 
         Returns:
             PipelineState，含数据库路径、SARIF 路径、Agent-R 审查结论与 PoC。
         """
-        state = PipelineState(vuln_type=self.config.vuln_type)
-        self.active_state = state  # 提前暴露，外部进度条可安全轮询
+        if checkpoint_path:
+            state = PipelineState.load_checkpoint(checkpoint_path)
+            logger.info("[Resume] 从 checkpoint 恢复, 已完成阶段: %s", state.completed_phases)
+        else:
+            state = PipelineState(vuln_type=self.config.vuln_type)
+
+        self.active_state = state
         mode = "GitHub 模式" if self.config.github_url else "本地模式"
         logger.info(
-            "=== QRSE-X Pipeline 启动 | %s | run_id=%s | 语言=%s | 漏洞=%s ===",
+            "=== Argus Pipeline 启动 | %s | run_id=%s | 语言=%s | 漏洞=%s ===",
             mode, state.run_id, self.config.language, self.config.vuln_type,
         )
 
         if self.config.source_dir:
             state.source_dir = self.config.source_dir
-            # 本地模式跳过 Phase 0 克隆，但仍执行框架检测
-            state.detected_frameworks = self.repo_manager.detect_frameworks(
-                self.config.source_dir
-            )
+            if "clone_repo" not in state.completed_phases:
+                state.detected_frameworks = self.repo_manager.detect_frameworks(
+                    self.config.source_dir
+                )
+
+        def _run_phase(phase_name: str, phase_fn: Callable) -> None:
+            if phase_name in state.completed_phases:
+                logger.info("[Skip] 阶段 '%s' 已完成（checkpoint），跳过", phase_name)
+                return
+            phase_fn(state)
+            try:
+                state.save_checkpoint(self.config.results_dir)
+            except Exception:  # noqa: BLE001
+                pass
 
         try:
-            # 外部 SARIF 模式：跳过 Phase 0~3（克隆/建库/生成查询/扫描），
-            # 直接用 Checkov/tfsec/Trivy/Semgrep 等工具的 SARIF 输出进入 Agent-R 审查
             if self.config.external_sarif:
                 from pathlib import Path as _P
                 ext = _P(self.config.external_sarif)
                 if not ext.exists():
                     raise FileNotFoundError(f"外部 SARIF 文件不存在: {ext}")
                 state.sarif_path = str(ext)
-                state.completed_phases.extend([
-                    "clone_repo", "create_database", "generate_query", "analyze",
-                ])
+                for ph in ("clone_repo", "create_database", "generate_query", "analyze"):
+                    if ph not in state.completed_phases:
+                        state.completed_phases.append(ph)
                 logger.info(
                     "[外部 SARIF] 跳过 Phase 0~3，直接进入 Agent-R 审查: %s", ext
                 )
-                self._phase_triage(state)
-                self._phase_review(state)
-                self._phase_generate_poc(state)
-                self._phase_verify(state)
+                _run_phase("triage", self._phase_triage)
+                _run_phase("review", self._phase_review)
+                _run_phase("generate_poc", self._phase_generate_poc)
+                _run_phase("verify", self._phase_verify)
             else:
                 if self.config.github_url:
-                    self._phase_clone_repo(state)
+                    _run_phase("clone_repo", self._phase_clone_repo)
 
-                self._phase_triage(state)
-                self._phase_create_database(state)
-                self._phase_generate_query(state)
-                self._phase_analyze(state)
-                self._phase_review(state)
-                self._phase_generate_poc(state)
-                self._phase_verify(state)
+                _run_phase("triage", self._phase_triage)
+                _run_phase("create_database", self._phase_create_database)
+                _run_phase("generate_query", self._phase_generate_query)
+                _run_phase("analyze", self._phase_analyze)
+                _run_phase("review", self._phase_review)
+                _run_phase("generate_poc", self._phase_generate_poc)
+                _run_phase("verify", self._phase_verify)
 
         except Exception as exc:  # noqa: BLE001
             state.error = str(exc)
             logger.error("Pipeline 执行失败: %s", exc)
+            try:
+                state.save_checkpoint(self.config.results_dir)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             if self.config.github_url and not self.config.external_sarif:
                 self._cleanup_clone(state)
@@ -901,7 +998,7 @@ class Coordinator:
         state.completed_phases.append("create_database")   # 标记为已完成（由调用方提供）
 
         logger.info(
-            "=== QRSE-X Phase 2-5 启动 | 漏洞=%s | DB=%s ===",
+            "=== Argus Phase 2-5 启动 | 漏洞=%s | DB=%s ===",
             self.config.vuln_type, db_path,
         )
 
@@ -950,7 +1047,7 @@ class Coordinator:
             raise ValueError("vuln_types 列表不能为空。")
 
         logger.info(
-            "=== QRSE-X 并行扫描启动 | 语言=%s | 漏洞类型数=%d | 并发=%d ===",
+            "=== Argus 并行扫描启动 | 语言=%s | 漏洞类型数=%d | 并发=%d ===",
             base_config.language, len(vuln_types), max_workers,
         )
 
@@ -988,10 +1085,24 @@ class Coordinator:
 
         logger.info("共享数据库路径: %s | 并行启动 %d 个扫描任务...", shared_db_path, len(vuln_types))
 
-        # ── Step 2：并行运行 Phase 2-5（每种漏洞类型独立）─────────────────
+        # ── Step 2：并行运行 Phase 2-5（共享无状态 Agent 实例）─────────────
+        shared_runner = first_coordinator.runner
+        shared_agent_r = first_coordinator.agent_r
+        shared_agent_s = first_coordinator.agent_s
+        shared_agent_e = first_coordinator.agent_e
+        shared_rule_memory = first_coordinator.rule_memory
+
         def _run_phase25(vuln_type: str) -> PipelineState:
             cfg = dataclasses.replace(base_config, vuln_type=vuln_type)
-            coordinator = cls(config=cfg)
+            coordinator = cls(
+                config=cfg,
+                agent_r=shared_agent_r,
+                agent_s=shared_agent_s,
+                agent_e=shared_agent_e,
+                runner=shared_runner,
+                rule_memory=shared_rule_memory,
+                _skip_rule_memory_init=True,
+            )
             return coordinator.run_from_database(
                 db_path=shared_db_path,
                 source_dir=shared_source_dir,
