@@ -66,6 +66,7 @@
         <option value="go">Go</option>
         <option value="csharp">C#</option>
         <option value="cpp">C++</option>
+        <option value="solidity">Solidity</option>
       </select>
       <input id="test-keyword" class="form-input flex-1" placeholder="输入漏洞类型/关键词 如 EL Injection" />
       <button class="btn btn-primary" onclick="runMatchTest()">测试</button>
@@ -259,10 +260,10 @@ async function runMatchTest() {
 }
 
 function langDisplay(lang) {
-  return {java:'Java',python:'Python',javascript:'JavaScript',go:'Go',csharp:'C#',cpp:'C++'}[lang] || lang;
+  return {java:'Java',python:'Python',javascript:'JavaScript',go:'Go',csharp:'C#',cpp:'C++',solidity:'Solidity',ruby:'Ruby',php:'PHP'}[lang] || lang;
 }
 function langColor(lang) {
-  return {java:'blue',python:'green',javascript:'yellow',go:'blue',csharp:'purple',cpp:'gray'}[lang] || 'gray';
+  return {java:'blue',python:'green',javascript:'yellow',go:'blue',csharp:'purple',cpp:'gray',solidity:'purple',ruby:'red',php:'blue'}[lang] || 'gray';
 }
 function escapeHtml(s) {
   if (!s) return '';

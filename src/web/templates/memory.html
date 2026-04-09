@@ -89,6 +89,7 @@
         <option value="go">Go</option>
         <option value="csharp">C#</option>
         <option value="cpp">C++</option>
+        <option value="solidity">Solidity</option>
       </select>
       <input id="search-top-k" class="form-input w-20" type="number" value="5" min="1" max="20" placeholder="Top-K" />
       <button class="btn btn-primary" onclick="runSearch()">搜索</button>
@@ -175,6 +176,20 @@
 {% block scripts %}
 <script>
 let allRecords = [];
+
+function getApiKey() {
+  let key = sessionStorage.getItem('argus_api_key') || '';
+  if (!key) {
+    key = prompt('请输入 API Key（如未设置 ARGUS_API_KEY 可留空）：') || '';
+    if (key) sessionStorage.setItem('argus_api_key', key);
+  }
+  return key;
+}
+
+function apiHeaders() {
+  const key = sessionStorage.getItem('argus_api_key') || '';
+  return key ? {'X-API-Key': key} : {};
+}
 
 document.addEventListener('DOMContentLoaded', loadMemory);
 
@@ -413,7 +428,7 @@ async function importMemory(input) {
   if (!file) return;
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch('/api/memory/import', {method: 'POST', body: formData});
+  const res = await fetch('/api/memory/import', {method: 'POST', body: formData, headers: {'X-API-Key': getApiKey()}});
   const data = await res.json();
   showToast(`导入完成：${data.imported || 0} 条记录`);
   input.value = '';
@@ -422,7 +437,7 @@ async function importMemory(input) {
 
 async function clearMemory() {
   if (!confirm('确定要清空所有记忆记录？此操作不可撤销。')) return;
-  await fetch('/api/memory/clear', {method: 'POST'});
+  await fetch('/api/memory/clear', {method: 'POST', headers: apiHeaders()});
   showToast('记忆库已清空');
   loadMemory();
 }
@@ -430,7 +445,7 @@ async function clearMemory() {
 async function verifyRecord(ruleId) {
   const res = await fetch(`/api/memory/${encodeURIComponent(ruleId)}/verify`, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', ...apiHeaders()},
     body: JSON.stringify({verified_by: 'web_ui', promote_to: 'verified'}),
   });
   const data = await res.json();
@@ -442,7 +457,7 @@ async function quarantineRecord(ruleId) {
   if (!confirm(`确定要隔离规则 ${ruleId}？该规则将永久不参与 Few-Shot 检索。`)) return;
   const res = await fetch(`/api/memory/${encodeURIComponent(ruleId)}/quarantine`, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', ...apiHeaders()},
     body: JSON.stringify({reason: 'web_ui_manual'}),
   });
   const data = await res.json();
@@ -473,7 +488,7 @@ function showToast(msg) {
 }
 
 function langToPrism(lang) {
-  return {java:'java',python:'python',javascript:'javascript',go:'go',csharp:'csharp',cpp:'cpp'}[lang] || 'clike';
+  return {java:'java',python:'python',javascript:'javascript',go:'go',csharp:'csharp',cpp:'cpp',solidity:'solidity',ruby:'ruby',php:'php'}[lang] || 'clike';
 }
 
 function esc(s) {
