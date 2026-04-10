@@ -30,6 +30,7 @@ from src.agents.agent_e import AgentE, VerificationResult, VerificationStatus
 from src.agents.agent_q import AgentQ
 from src.agents.agent_r import AgentR, ReviewResult, VulnStatus
 from src.agents.agent_s import AgentS, PoCResult
+from src.orchestrator.event_bus import AgentBus, AgentMessage
 from src.utils.codeql_runner import CodeQLRunner
 from src.utils.db_cache import DatabaseCache
 from src.utils.repo_manager import GithubRepoManager
@@ -370,6 +371,7 @@ class Coordinator:
             )
         # 进度追踪：run() 开始后立即设置，外部可安全轮询 completed_phases
         self.active_state: Optional[PipelineState] = None
+        self.bus = AgentBus()
 
     # ------------------------------------------------------------------
     # 各阶段私有方法
@@ -429,6 +431,10 @@ class Coordinator:
                 )
 
         state.completed_phases.append("clone_repo")
+        self.bus.publish(AgentMessage(
+            sender="Coordinator", event="phase_completed",
+            payload={"phase": "clone_repo", "frameworks": list(frameworks), "mode": state.scan_mode},
+        ))
 
         logger.info(
             "[Phase 0] 完成 | 构建命令: %s | 检测框架: %s | 模式: %s",
@@ -530,6 +536,10 @@ class Coordinator:
 
         state.db_path = db_path
         state.completed_phases.append("create_database")
+        self.bus.publish(AgentMessage(
+            sender="Coordinator", event="phase_completed",
+            payload={"phase": "create_database", "db_path": db_path, "cached": False},
+        ))
         logger.info("[Phase 1] 数据库创建成功: %s", db_path)
 
     @staticmethod
@@ -805,6 +815,27 @@ class Coordinator:
         state.completed_phases.append("review")
 
         vuln_count = len(state.vulnerable_findings)
+        self.bus.publish(AgentMessage(
+            sender="Agent-R", event="review_completed",
+            payload={
+                "phase": "review",
+                "total_findings": len(filtered),
+                "confirmed_vulns": vuln_count,
+                "vuln_type": self.config.vuln_type,
+            },
+        ))
+        if vuln_count > 0:
+            self.bus.publish(AgentMessage(
+                sender="Agent-R", event="vulnerability_found",
+                payload={
+                    "vuln_type": self.config.vuln_type,
+                    "count": vuln_count,
+                    "locations": [
+                        f"{r.finding.file_uri}:{r.finding.start_line}"
+                        for r in state.vulnerable_findings[:10]
+                    ],
+                },
+            ))
         logger.info(
             "[Phase 4] 审查完成 | 确认漏洞: %d | 总计: %d",
             vuln_count, len(filtered),
@@ -1059,7 +1090,38 @@ class Coordinator:
             len(state.vulnerable_findings),
             dyn_confirmed,
         )
+
+        self._log_agent_metrics()
         return state
+
+    def _log_agent_metrics(self) -> None:
+        """汇总并输出各 Agent 的 LLM 调用指标。"""
+        agents = [
+            ("Agent-Q", self.agent_q),
+            ("Agent-R", self.agent_r),
+            ("Agent-S", self.agent_s),
+            ("Agent-E", self.agent_e),
+        ]
+        total_calls = 0
+        total_latency = 0.0
+        total_errors = 0
+        for name, agent in agents:
+            m = agent.metrics.summary()
+            total_calls += m["total_calls"]
+            total_latency += m["total_latency_sec"]
+            total_errors += m["total_errors"]
+            if m["total_calls"] > 0:
+                logger.info(
+                    "[Metrics] %s: 调用=%d 错误=%d 平均延迟=%.1fs 总延迟=%.1fs",
+                    name, m["total_calls"], m["total_errors"],
+                    m["avg_latency_sec"], m["total_latency_sec"],
+                )
+        if total_calls > 0:
+            logger.info(
+                "[Metrics] 汇总: LLM总调用=%d 总错误=%d 总延迟=%.1fs 错误率=%.1f%%",
+                total_calls, total_errors, total_latency,
+                (total_errors / total_calls * 100) if total_calls else 0,
+            )
 
     # ------------------------------------------------------------------
     # 公开接口：基于已有数据库运行 Phase 2-5

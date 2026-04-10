@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus"
+version = "2.4.0"
+description = "多 Agent 协同的 CodeQL 规则自动生成与漏洞检测系统"
+readme = "architecture.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "langchain>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langchain-core>=0.2.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "sarif-tools>=2.0.0",
+    "tenacity>=8.3.0",
+    "rich>=13.7.0",
+    "GitPython>=3.1.40",
+    "scikit-learn>=1.4.0",
+    "pyyaml>=6.0.0",
+    "flask>=3.0.0",
+]
+
+[project.optional-dependencies]
+rag = [
+    "chromadb>=0.5.0",
+    "faiss-cpu>=1.8.0",
+    "sentence-transformers>=2.7.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+argus = "src.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_codeql: 需要本地安装 CodeQL CLI",
+    "requires_llm: 需要真实 LLM API Key",
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

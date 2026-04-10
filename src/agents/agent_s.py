@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 from src.agents.base_agent import BaseAgent
@@ -329,7 +328,7 @@ class AgentS(BaseAgent):
         super().__init__(llm=llm, temperature=0.3)
 
     def _invoke_llm(self, finding: ReviewResult, payloads: list[str]) -> dict:
-        """调用 LLM 生成定制化 PoC。"""
+        """调用 LLM 生成定制化 PoC（带超时保护）。"""
         payload_text = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(payloads))
         lang_tag = _LANG_TAG_MAP.get(
             getattr(finding, "language", "java"), "java"
@@ -364,11 +363,10 @@ class AgentS(BaseAgent):
             payloads=payload_text,
             lang_tag=lang_tag,
         )
-        chain = self.llm | self._parser
-        raw = chain.invoke([
-            SystemMessage(content=_SYSTEM_PROMPT_S),
-            HumanMessage(content=human_msg),
-        ])
+        raw = self.invoke_with_timeout(
+            [SystemMessage(content=_SYSTEM_PROMPT_S), HumanMessage(content=human_msg)],
+            timeout_sec=90,
+        )
         return _parse_poc_json(raw), raw
 
     def generate_poc(self, finding: ReviewResult) -> PoCResult:
@@ -484,11 +482,10 @@ class AgentS(BaseAgent):
 }}
 """
         try:
-            chain = self.llm | self._parser
-            raw = chain.invoke([
-                SystemMessage(content=_SYSTEM_PROMPT_S),
-                HumanMessage(content=refine_prompt),
-            ])
+            raw = self.invoke_with_timeout(
+                [SystemMessage(content=_SYSTEM_PROMPT_S), HumanMessage(content=refine_prompt)],
+                timeout_sec=90,
+            )
             poc_data = _parse_poc_json(raw)
         except Exception as exc:
             logger.warning("[Agent-S] 迭代精化 LLM 调用失败: %s", exc)

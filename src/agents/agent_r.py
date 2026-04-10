@@ -616,79 +616,13 @@ def _load_code_context(
 
 
 def _parse_llm_json(raw: str) -> dict[str, Any]:
-    """
-    从 LLM 原始输出中提取 JSON 对象，容忍 markdown 代码块包裹。
-
-    Args:
-        raw: LLM 原始响应字符串。
-
-    Returns:
-        解析后的字典。
-
-    Raises:
-        ValueError: JSON 解析失败时抛出。
-    """
-    text = raw.strip() if raw else ""
-    if not text:
-        raise ValueError("LLM 返回空响应")
-    if "```" in text:
-        import re
-        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-        if m:
-            text = m.group(1).strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM 返回的 JSON 无效: {exc}\n原始内容:\n{raw}") from exc
+    """从 LLM 原始输出中提取 JSON 对象（委托给 BaseAgent.parse_json）。"""
+    return BaseAgent.parse_json(raw)
 
 
 def _parse_llm_json_array(raw: str, expected_count: int) -> list[dict[str, Any]]:
-    """
-    从 LLM 原始输出中提取 JSON 数组（批量审查模式）。
-
-    Returns:
-        字典列表，长度应与 expected_count 一致。
-
-    Raises:
-        ValueError: JSON 解析失败时抛出。
-    """
-    import re
-    text = raw.strip() if raw else ""
-
-    if not text:
-        raise ValueError("LLM 返回空响应")
-
-    if "```" in text:
-        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-        if m:
-            text = m.group(1).strip()
-
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        bracket_start = text.find("[")
-        bracket_end = text.rfind("]")
-        if bracket_start != -1 and bracket_end > bracket_start:
-            try:
-                parsed = json.loads(text[bracket_start : bracket_end + 1])
-            except json.JSONDecodeError as exc2:
-                raise ValueError(f"批量 JSON 解析失败: {exc2}\n原始内容:\n{raw[:500]}") from exc2
-        else:
-            brace_start = text.find("{")
-            brace_end = text.rfind("}")
-            if brace_start != -1 and brace_end > brace_start:
-                try:
-                    parsed = [json.loads(text[brace_start : brace_end + 1])]
-                except json.JSONDecodeError as exc3:
-                    raise ValueError(f"批量 JSON 解析失败: {exc3}\n原始内容:\n{raw[:500]}") from exc3
-            else:
-                raise ValueError(f"批量 JSON 解析失败: 未找到 JSON 结构\n原始内容:\n{raw[:500]}")
-
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    if not isinstance(parsed, list):
-        raise ValueError(f"期望 JSON 数组，实际类型: {type(parsed).__name__}")
+    """从 LLM 原始输出中提取 JSON 数组（委托给 BaseAgent.parse_json_array + id 对齐）。"""
+    parsed = BaseAgent.parse_json_array(raw, expected_count=expected_count)
 
     if expected_count > 0 and all("id" in item for item in parsed):
         indexed: dict[int, dict] = {}

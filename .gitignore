@@ -14,6 +14,8 @@ data/workspaces/
 data/results/
 data/benchmark/BenchmarkJava/
 data/rule_memory/chroma_db/
+data/rule_memory/faiss.index
+data/rule_memory/faiss.ids.json
 
 # 运行时产生的历史与缓存（每台机器各不相同）
 data/scan_history.json

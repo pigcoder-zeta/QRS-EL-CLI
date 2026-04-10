@@ -35,7 +35,6 @@ from enum import Enum
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 from src.agents.base_agent import BaseAgent
@@ -556,7 +555,7 @@ class AgentE(BaseAgent):
         status_code: int,
         response_body: str,
     ) -> dict:
-        """调用 LLM 分析 HTTP 响应，判断 PoC 是否命中。"""
+        """调用 LLM 分析 HTTP 响应，判断 PoC 是否命中（带超时保护）。"""
         human_msg = _VERIFY_TEMPLATE.format(
             vuln_type=vuln_type,
             method=method,
@@ -567,11 +566,10 @@ class AgentE(BaseAgent):
             response_body=response_body or "（响应为空）",
         )
         try:
-            chain = self.llm | self._parser
-            raw = chain.invoke([
-                SystemMessage(content=_SYSTEM_PROMPT_E),
-                HumanMessage(content=human_msg),
-            ])
+            raw = self.invoke_with_timeout(
+                [SystemMessage(content=_SYSTEM_PROMPT_E), HumanMessage(content=human_msg)],
+                timeout_sec=60,
+            )
             return self.parse_json(raw)
         except Exception as exc:
             logger.debug("[Agent-E] LLM 分析失败: %s", exc)

@@ -3,6 +3,8 @@ LLM 实例工厂：全局复用 ChatOpenAI 实例，避免每个 Agent 独立创
 
 通过 (model, temperature, timeout, max_tokens, max_retries) 组合键缓存实例，
 同参数的 Agent 共享同一个 HTTP 连接池，减少连接开销。
+
+并发限流：通过全局信号量控制同时发起的 LLM 请求数，防止触发 API 速率限制（429）。
 """
 
 from __future__ import annotations
@@ -18,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _instances: dict[str, ChatOpenAI] = {}
+
+_MAX_CONCURRENT_LLM = int(os.environ.get("LLM_MAX_CONCURRENT", "6"))
+_llm_semaphore = threading.Semaphore(_MAX_CONCURRENT_LLM)
+
+
+def get_semaphore() -> threading.Semaphore:
+    """获取全局 LLM 并发信号量，供 BaseAgent.invoke_with_timeout 使用。"""
+    return _llm_semaphore
 
 
 def get_llm(
@@ -62,5 +72,7 @@ def get_llm(
 
 def reset() -> None:
     """清空缓存（主要用于测试）。"""
+    global _llm_semaphore
     with _lock:
         _instances.clear()
+    _llm_semaphore = threading.Semaphore(_MAX_CONCURRENT_LLM)

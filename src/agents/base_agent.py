@@ -228,9 +228,10 @@ class BaseAgent:
         heartbeat_interval: int = 30,
     ) -> str:
         """
-        带超时和心跳日志的 LLM 调用。
+        带超时、心跳日志和全局并发限流的 LLM 调用。
 
         使用 ThreadPoolExecutor + future.result(timeout) 替代手动 Thread 管理。
+        通过 LLMFactory 的全局信号量控制并发数，防止触发 API 429 限流。
 
         Args:
             messages: LangChain 消息列表。
@@ -243,11 +244,18 @@ class BaseAgent:
         Raises:
             TimeoutError: 超过 timeout_sec 时抛出。
         """
+        from src.utils.llm_factory import get_semaphore
+
         chain = self.llm | self._parser
+        sem = get_semaphore()
         t0 = time.time()
 
+        def _guarded_invoke(msgs: list) -> str:
+            with sem:
+                return chain.invoke(msgs)
+
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(chain.invoke, messages)
+            future = pool.submit(_guarded_invoke, messages)
             while True:
                 try:
                     remaining = timeout_sec - (time.time() - t0)

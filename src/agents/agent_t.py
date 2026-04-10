@@ -346,12 +346,10 @@ class AgentT(BaseAgent):
 
     def _score_kernel(self, root: Path) -> float:
         """扫描源文件，计算内核代码指纹匹配度。"""
-        # 快速检查标志文件
         kconfig = root / "Kconfig"
         if kconfig.exists():
             return 0.95
 
-        # 检查 Makefile 中的 obj-m / obj-y
         for mf in [root / "Makefile", root / "makefile"]:
             if mf.exists():
                 try:
@@ -361,26 +359,27 @@ class AgentT(BaseAgent):
                 except OSError:
                     pass
 
-        # 采样 C/H 文件检查内核头文件
+        _skip_dirs = {".git", "vendor", "node_modules", "__pycache__", "build", "dist"}
         hit_count = 0
         sample_count = 0
         max_sample = 50
 
-        for fp in root.rglob("*"):
-            if fp.suffix.lower() not in (".c", ".h"):
-                continue
-            if any(seg in fp.parts for seg in (".git", "vendor", "node_modules")):
-                continue
-            sample_count += 1
+        for ext in ("*.c", "*.h"):
+            for fp in root.rglob(ext):
+                if any(seg in fp.parts for seg in _skip_dirs):
+                    continue
+                sample_count += 1
+                if sample_count > max_sample:
+                    break
+                try:
+                    text = fp.read_text(encoding="utf-8", errors="ignore")[:3000]
+                except OSError:
+                    continue
+                hits = sum(1 for pat in _KERNEL_HEADER_PATTERNS if pat.search(text))
+                if hits >= 3:
+                    hit_count += 1
             if sample_count > max_sample:
                 break
-            try:
-                text = fp.read_text(encoding="utf-8", errors="ignore")[:3000]
-            except OSError:
-                continue
-            hits = sum(1 for pat in _KERNEL_HEADER_PATTERNS if pat.search(text))
-            if hits >= 3:
-                hit_count += 1
 
         if sample_count == 0:
             return 0.0
@@ -396,10 +395,12 @@ class AgentT(BaseAgent):
     def _check_firmware(self, root: Path) -> bool:
         """检查是否为嵌入式固件项目。"""
         for name in _FIRMWARE_INDICATORS:
-            matches = list(root.rglob(name))
-            if matches:
-                return True
-        for fp in root.rglob("*.ld"):
+            try:
+                if next(root.rglob(name), None) is not None:
+                    return True
+            except StopIteration:
+                pass
+        if next(root.rglob("*.ld"), None) is not None:
             return True
         return False
 

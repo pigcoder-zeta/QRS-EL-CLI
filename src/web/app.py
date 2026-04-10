@@ -66,7 +66,8 @@ _PROTECTED_ENDPOINTS = {
 
 
 def _require_api_key(f):
-    """保护敏感 API 接口的装饰器——检查 X-API-Key 请求头。"""
+    """保护敏感 API 接口的装饰器——检查 X-API-Key 请求头（使用恒定时间比较防时序攻击）。"""
+    import hmac as _hmac
     from functools import wraps
 
     @wraps(f)
@@ -74,10 +75,54 @@ def _require_api_key(f):
         if not _ARGUS_API_KEY:
             return f(*args, **kwargs)
         provided = request.headers.get("X-API-Key", "")
-        if not provided or provided != _ARGUS_API_KEY:
+        if not provided or not _hmac.compare_digest(provided, _ARGUS_API_KEY):
             return jsonify({"error": "未授权：缺少或无效的 API Key"}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+# ---------------------------------------------------------------------------
+# 简易速率限制（内存计数器，适合单进程部署）
+# ---------------------------------------------------------------------------
+
+import time as _time
+import threading as _rl_threading
+from collections import defaultdict as _defaultdict
+
+_rate_limit_lock = _rl_threading.Lock()
+_rate_limit_store: dict[str, list[float]] = _defaultdict(list)
+_RATE_LIMIT_WINDOW = 60     # 窗口期（秒）
+_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("ARGUS_RATE_LIMIT", "30"))
+
+
+@app.before_request
+def _check_rate_limit():
+    """对 API 端点实施简易滑动窗口速率限制。"""
+    if not request.path.startswith("/api/"):
+        return None
+    client_ip = request.remote_addr or "unknown"
+    now = _time.time()
+    with _rate_limit_lock:
+        timestamps = _rate_limit_store[client_ip]
+        cutoff = now - _RATE_LIMIT_WINDOW
+        _rate_limit_store[client_ip] = [t for t in timestamps if t > cutoff]
+        if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT_MAX_REQUESTS:
+            return jsonify({"error": "请求过于频繁，请稍后再试"}), 429
+        _rate_limit_store[client_ip].append(now)
+    return None
+
+
+@app.after_request
+def _set_security_headers(response):
+    """设置基础安全响应头。"""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
