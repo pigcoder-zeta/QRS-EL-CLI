@@ -8,6 +8,8 @@ GitHub 仓库管理器。
 from __future__ import annotations
 
 import logging
+import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -41,6 +43,8 @@ _JAVA_BUILD_FILES: list[tuple[str, str, str | None]] = [
     ("build.gradle.kts", f"{_GRADLE_CMD} build -x test",  f"{_GRADLE_FALLBACK} build -x test"),
 ]
 
+_REVISION_PATTERN = re.compile(r"<revision>\s*([^<\s]+)\s*</revision>", re.IGNORECASE)
+
 
 class RepoCloneError(RuntimeError):
     """仓库克隆失败时抛出。"""
@@ -56,6 +60,33 @@ class GithubRepoManager:
 
     def __init__(self, clone_timeout: int = _CLONE_TIMEOUT_S) -> None:
         self.clone_timeout = clone_timeout
+
+    @staticmethod
+    def _infer_maven_revision(root: Path) -> str | None:
+        """
+        推断 Maven CI-friendly 版本属性 revision。
+
+        优先级：
+        1) 环境变量 ARGUS_MAVEN_REVISION
+        2) 仓库根 pom.xml 中的 <revision> 值
+        """
+        env_revision = os.getenv("ARGUS_MAVEN_REVISION", "").strip()
+        if env_revision:
+            return env_revision
+
+        root_pom = root / "pom.xml"
+        if not root_pom.exists():
+            return None
+
+        try:
+            pom_text = root_pom.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+
+        match = _REVISION_PATTERN.search(pom_text)
+        if not match:
+            return None
+        return match.group(1).strip()
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -191,6 +222,7 @@ class GithubRepoManager:
             # 优先使用 Gradle Wrapper（项目自带，不依赖系统全局 gradle）
             gradle_wrapper = _GRADLE_CMD  # gradlew.bat (Windows) 或 ./gradlew (Unix)
             has_wrapper = (root / gradle_wrapper.lstrip("./")).exists()
+            inferred_revision = self._infer_maven_revision(root)
 
             for filename, wrapper_cmd, fallback_cmd in _JAVA_BUILD_FILES:
                 if (root / filename).exists():
@@ -199,6 +231,14 @@ class GithubRepoManager:
                         command = fallback_cmd
                     else:
                         command = wrapper_cmd
+
+                    # Maven 项目注入 revision 兜底，避免 CI-friendly 版本解析失败。
+                    if filename == "pom.xml" and inferred_revision:
+                        command = f'{command} "-Drevision={inferred_revision}"'
+                        logger.info(
+                            "检测到 Maven revision=%s，已追加构建参数 -Drevision。",
+                            inferred_revision,
+                        )
                     logger.info(
                         "探测到 %s，将使用构建命令: %s", filename, command
                     )
