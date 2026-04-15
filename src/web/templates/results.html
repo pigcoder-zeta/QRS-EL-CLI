@@ -43,7 +43,7 @@
     </button>
     <div class="flex-1"></div>
     <span id="filter-counter" class="text-xs text-gray-400 font-mono"></span>
-    <input id="finding-search" class="form-input text-xs py-1 w-48" placeholder="搜索 finding..." oninput="applyFilters()" />
+    <input id="finding-search" class="form-input text-xs py-1 w-48" placeholder="搜索 finding..." oninput="scheduleApplyFilters()" />
     <select id="finding-sort" class="form-select text-xs py-1 w-32" onchange="applyFilters()">
       <option value="default">默认排序</option>
       <option value="confidence-desc">置信度 ↓</option>
@@ -76,6 +76,8 @@
 {% block scripts %}
 <script>
 const FILENAME = "{{ filename }}";
+const findingDataMap = new Map();
+let filterTimer = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
   const res = await fetch(`/api/results/${FILENAME}`);
@@ -109,8 +111,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     <div class="stat-card relative overflow-hidden group"><div class="absolute inset-0 bg-gradient-to-br from-yellow-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div><div class="stat-value text-yellow-400 relative z-10">${totalUncertain}</div><div class="stat-label relative z-10">不确定</div></div>
   `;
 
-  // Render each run
+  // Render each run (batch string build to avoid repeated reflow)
   const container = document.getElementById('runs-container');
+  const runCards = [];
+  const pendingCharts = [];
   runs.forEach((run, ri) => {
     const statusBadge = run.status === 'success'
       ? '<span class="badge badge-green">成功</span>'
@@ -128,7 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const stats = run.stats || {};
     const hasChart = (stats.vulnerable || 0) + (stats.safe || 0) + (stats.uncertain || 0) > 0;
 
-    container.innerHTML += `
+    runCards.push(`
       <div class="card">
         <div class="card-header">
           <div class="flex items-center gap-3">
@@ -153,25 +157,33 @@ document.addEventListener('DOMContentLoaded', async () => {
           </div>
         </div>
       </div>
-    `;
+    `);
 
     // Draw chart
     if (hasChart) {
-      setTimeout(() => {
-        const ctx = document.getElementById(`chart-${ri}`);
-        if (ctx) new Chart(ctx, {
-          type: 'doughnut',
-          data: {
-            labels: ['漏洞', '安全', '不确定'],
-            datasets: [{ data: [stats.vulnerable||0, stats.safe||0, stats.uncertain||0],
-              backgroundColor: ['#f87171','#4ade80','#facc15'], borderWidth: 0 }]
-          },
-          options: { responsive: true, plugins: { legend: { display: true, position: 'bottom',
-            labels: { color: '#9ca3af', font: { size: 10 } } } } }
-        });
-      }, 50);
+      pendingCharts.push({ ri, stats });
     }
   });
+
+  container.innerHTML = runCards.join('');
+
+  // Draw chart after DOM insertion
+  setTimeout(() => {
+    pendingCharts.forEach(({ ri, stats }) => {
+      const ctx = document.getElementById(`chart-${ri}`);
+      if (!ctx) return;
+      new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['漏洞', '安全', '不确定'],
+          datasets: [{ data: [stats.vulnerable||0, stats.safe||0, stats.uncertain||0],
+            backgroundColor: ['#f87171','#4ade80','#facc15'], borderWidth: 0 }]
+        },
+        options: { responsive: true, plugins: { legend: { display: true, position: 'bottom',
+          labels: { color: '#9ca3af', font: { size: 10 } } } } }
+      });
+    });
+  }, 50);
 });
 
 function renderFinding(f, ri, fi) {
@@ -181,6 +193,35 @@ function renderFinding(f, ri, fi) {
   const conf = Math.round((f.confidence || 0) * 100);
   const confColor = conf >= 80 ? '#f87171' : conf >= 50 ? '#facc15' : '#4ade80';
 
+  const searchText = [f.file, f.rule_id, f.message, f.sink_method, f.engine_detected].filter(Boolean).join(' ').toLowerCase();
+  const findingKey = `${ri}-${fi}`;
+  findingDataMap.set(findingKey, f);
+  return `
+    <div class="finding-card" id="finding-${ri}-${fi}" data-status="${f.status||''}" data-confidence="${f.confidence||0}" data-file="${escapeHtml(f.file||'')}" data-searchtext="${escapeHtml(searchText)}">
+      <div class="finding-header" onclick="toggleFinding('${findingKey}', this.parentElement)">
+        <svg class="w-4 h-4 text-gray-600 shrink-0 transition-transform" style="transform:rotate(0deg)"><path fill="currentColor" d="M6 9l6 6 6-6z"/></svg>
+        <span class="text-sm font-mono text-gray-300 flex-1 truncate">${escapeHtml(f.file || '')}:${f.line || '?'}</span>
+        ${badge}
+        <div class="w-16 shrink-0">
+          <div class="confidence-bar"><div class="confidence-fill" style="width:${conf}%;background:${confColor}"></div></div>
+          <div class="text-xs text-gray-600 text-center mt-0.5">${conf}%</div>
+        </div>
+      </div>
+      <div class="finding-body"></div>
+    </div>`;
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderFindingBody(f) {
   let pocHtml = '';
   if (f.poc) {
     const p = f.poc;
@@ -192,38 +233,27 @@ function renderFinding(f, ri, fi) {
       ${p.severity ? `<div class="mt-1"><span class="badge ${p.severity==='critical'?'badge-red':p.severity==='high'?'badge-yellow':'badge-gray'}">${p.severity}</span></div>` : ''}
     </div>`;
   }
-
-  const searchText = [f.file, f.rule_id, f.message, f.sink_method, f.engine_detected].filter(Boolean).join(' ').toLowerCase();
   return `
-    <div class="finding-card" id="finding-${ri}-${fi}" data-status="${f.status||''}" data-confidence="${f.confidence||0}" data-file="${escapeHtml(f.file||'')}" data-searchtext="${escapeHtml(searchText)}">`
-      <div class="finding-header" onclick="this.parentElement.classList.toggle('open')">
-        <svg class="w-4 h-4 text-gray-600 shrink-0 transition-transform" style="transform:rotate(0deg)"><path fill="currentColor" d="M6 9l6 6 6-6z"/></svg>
-        <span class="text-sm font-mono text-gray-300 flex-1 truncate">${escapeHtml(f.file || '')}:${f.line || '?'}</span>
-        ${badge}
-        <div class="w-16 shrink-0">
-          <div class="confidence-bar"><div class="confidence-fill" style="width:${conf}%;background:${confColor}"></div></div>
-          <div class="text-xs text-gray-600 text-center mt-0.5">${conf}%</div>
-        </div>
-      </div>
-      <div class="finding-body">
-        <div class="space-y-2 text-sm">
-          <div><span class="text-gray-500">规则:</span> <span class="text-gray-300 font-mono text-xs">${escapeHtml(f.rule_id || '')}</span></div>
-          <div><span class="text-gray-500">消息:</span> <span class="text-gray-400">${escapeHtml(f.message || '')}</span></div>
-          <div><span class="text-gray-500">引擎:</span> <span class="text-brand-500">${escapeHtml(f.engine_detected || '-')}</span></div>
-          <div><span class="text-gray-500">Sink:</span> <span class="font-mono text-yellow-400 text-xs">${escapeHtml(f.sink_method || '-')}</span></div>
-          ${f.reasoning ? `<div class="p-2 bg-gray-900 rounded text-xs text-gray-400 leading-relaxed">${escapeHtml(f.reasoning)}</div>` : ''}
-          ${f.code_context ? `<pre class="text-xs bg-black rounded p-2 overflow-x-auto"><code>${escapeHtml(f.code_context)}</code></pre>` : ''}
-          ${pocHtml}
-        </div>
-      </div>
-    </div>`;
+    <div class="space-y-2 text-sm">
+      <div><span class="text-gray-500">规则:</span> <span class="text-gray-300 font-mono text-xs">${escapeHtml(f.rule_id || '')}</span></div>
+      <div><span class="text-gray-500">消息:</span> <span class="text-gray-400">${escapeHtml(f.message || '')}</span></div>
+      <div><span class="text-gray-500">引擎:</span> <span class="text-brand-500">${escapeHtml(f.engine_detected || '-')}</span></div>
+      <div><span class="text-gray-500">Sink:</span> <span class="font-mono text-yellow-400 text-xs">${escapeHtml(f.sink_method || '-')}</span></div>
+      ${f.reasoning ? `<div class="p-2 bg-gray-900 rounded text-xs text-gray-400 leading-relaxed">${escapeHtml(f.reasoning)}</div>` : ''}
+      ${f.code_context ? `<pre class="text-xs bg-black rounded p-2 overflow-x-auto"><code>${escapeHtml(f.code_context)}</code></pre>` : ''}
+      ${pocHtml}
+    </div>
+  `;
 }
 
-function escapeHtml(s) {
-  if (!s) return '';
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+function toggleFinding(findingKey, cardEl) {
+  cardEl.classList.toggle('open');
+  const body = cardEl.querySelector('.finding-body');
+  if (!body || body.dataset.loaded === '1') return;
+  const f = findingDataMap.get(findingKey);
+  if (!f) return;
+  body.innerHTML = renderFindingBody(f);
+  body.dataset.loaded = '1';
 }
 
 // --- Mode C: Interactive filtering & sorting ---
@@ -267,6 +297,11 @@ function applyFilters() {
   const total = document.querySelectorAll('.finding-card').length;
   const counter = document.getElementById('filter-counter');
   if (counter) counter.textContent = `${visible}/${total}`;
+}
+
+function scheduleApplyFilters() {
+  if (filterTimer) clearTimeout(filterTimer);
+  filterTimer = setTimeout(applyFilters, 120);
 }
 
 // --- Benchmark scoring ---

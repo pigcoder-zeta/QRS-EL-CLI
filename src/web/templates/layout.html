@@ -4,26 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Argus Dashboard{% endblock %}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-java.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-csharp.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: { extend: { colors: {
-        brand: { 50:'#eff6ff',100:'#dbeafe',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',900:'#1e3a5f' },
-      }}}
-    }
-  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}?v=20260414a">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=20260414a">
+  <script src="{{ url_for('static', filename='js/chart.umd.min.js') }}?v=20260414a"></script>
+  {% if request.path in ['/templates', '/memory'] %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/prism.min.css') }}">
+  <script src="{{ url_for('static', filename='js/prism.js') }}"></script>
+  {% endif %}
 </head>
 <body class="h-full bg-gray-950 text-gray-100 bg-gradient-to-br from-gray-950 via-gray-900 to-slate-900">
   <div class="flex h-full">

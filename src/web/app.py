@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -39,6 +40,9 @@ _RULE_MEMORY_DIR = str(_PROJECT_ROOT / "data" / "rule_memory")
 
 _cached_codeql_version: str | None = None
 _cached_memory: RuleMemory | None = None
+_cached_results_cache_key: str | None = None
+_cached_results_payload: list[dict[str, Any]] | None = None
+_results_cache_lock = threading.Lock()
 
 app = Flask(
     __name__,
@@ -120,7 +124,11 @@ def _set_security_headers(response):
     response.headers.setdefault("X-XSS-Protection", "1; mode=block")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "font-src 'self' https://cdn.jsdelivr.net data:; "
+        "img-src 'self' data: https:;",
     )
     return response
 
@@ -201,26 +209,49 @@ def api_scan_status(task_id: str):
 
 @app.route("/api/results")
 def api_results_list():
-    results: list[dict[str, Any]] = []
+    global _cached_results_cache_key, _cached_results_payload
+
+    result_files = []
     if _RESULTS_DIR.exists():
-        for f in sorted(_RESULTS_DIR.glob("*_report.json"), reverse=True):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                meta = data.get("meta", {})
-                runs = data.get("runs", [])
-                total_vulns = sum(
-                    r.get("stats", {}).get("vulnerable", 0) for r in runs
-                )
-                results.append({
-                    "filename": f.name,
-                    "generated_at": meta.get("generated_at", ""),
-                    "language": meta.get("language", ""),
-                    "total_runs": meta.get("total_runs", len(runs)),
-                    "total_vulnerabilities": total_vulns,
-                    "vuln_types": [r.get("vuln_type", "") for r in runs],
-                })
-            except Exception:
-                pass
+        result_files = sorted(_RESULTS_DIR.glob("*_report.json"), reverse=True)
+
+    # Use file metadata as cache key to avoid reparsing large report sets repeatedly.
+    cache_key_parts = [str(len(result_files))]
+    for f in result_files:
+        try:
+            st = f.stat()
+            cache_key_parts.append(f"{f.name}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            cache_key_parts.append(f"{f.name}:missing")
+    cache_key = "|".join(cache_key_parts)
+
+    with _results_cache_lock:
+        if _cached_results_cache_key == cache_key and _cached_results_payload is not None:
+            return jsonify(_cached_results_payload)
+
+    results: list[dict[str, Any]] = []
+    for f in result_files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            meta = data.get("meta", {})
+            runs = data.get("runs", [])
+            total_vulns = sum(
+                r.get("stats", {}).get("vulnerable", 0) for r in runs
+            )
+            results.append({
+                "filename": f.name,
+                "generated_at": meta.get("generated_at", ""),
+                "language": meta.get("language", ""),
+                "total_runs": meta.get("total_runs", len(runs)),
+                "total_vulnerabilities": total_vulns,
+                "vuln_types": [r.get("vuln_type", "") for r in runs],
+            })
+        except Exception:
+            pass
+
+    with _results_cache_lock:
+        _cached_results_cache_key = cache_key
+        _cached_results_payload = results
     return jsonify(results)
 
 
@@ -250,6 +281,17 @@ def api_templates():
             "cwe": "",
         })
     return jsonify({"templates": templates})
+
+
+@app.route("/api/templates/stats")
+def api_templates_stats():
+    by_language: dict[str, int] = {}
+    for t in _ALL_TEMPLATES:
+        by_language[t.language] = by_language.get(t.language, 0) + 1
+    return jsonify({
+        "total": len(_ALL_TEMPLATES),
+        "by_language": by_language,
+    })
 
 
 @app.route("/api/templates/test", methods=["POST"])

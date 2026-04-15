@@ -528,6 +528,19 @@ class Coordinator:
             build_command=state.build_command or None,
             build_mode=self.config.build_mode,
         )
+        if not success and state.build_command:
+            logger.warning(
+                "[Phase 1] 构建命令 '%s' 失败，尝试降级到 --build-mode=none（纯源码分析）...",
+                state.build_command,
+            )
+            state.build_command = ""
+            success = self.runner.create_database(
+                source_dir=state.source_dir,
+                db_path=db_path,
+                language=self.config.language,
+                build_command=None,
+                build_mode="none",
+            )
         if not success:
             raise RuntimeError(f"CodeQL 数据库创建失败。源码路径: {state.source_dir}")
 
