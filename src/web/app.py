@@ -18,13 +18,18 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import (
     Flask,
     Response,
+    redirect,
     jsonify,
     render_template,
     request,
     send_file,
+    url_for,
 )
 
 from src.utils.ql_template_library import QLTemplateLibrary, _ALL_TEMPLATES
@@ -33,6 +38,19 @@ from src.utils.vuln_catalog import VULN_CATALOG
 from src.web.scan_manager import ScanManager
 
 logger = logging.getLogger(__name__)
+
+
+class _QuietHealthFilter(logging.Filter):
+    """过滤 Werkzeug 对高频健康检查等探针端点的请求日志，避免刷屏。"""
+
+    _SILENT_PATHS = ("/api/system/health",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._SILENT_PATHS)
+
+
+logging.getLogger("werkzeug").addFilter(_QuietHealthFilter())
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _RESULTS_DIR = _PROJECT_ROOT / "data" / "results"
@@ -138,8 +156,8 @@ def _set_security_headers(response):
 # ---------------------------------------------------------------------------
 
 @app.route("/")
-def page_dashboard():
-    return render_template("dashboard.html")
+def page_root():
+    return redirect(url_for("page_scan"))
 
 
 @app.route("/scan")

@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,6 +34,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 from src.agents.base_agent import BaseAgent, llm_retry
+from src.utils.result_store import ResultStore
 
 logger = logging.getLogger(__name__)
 
@@ -691,6 +693,7 @@ class AgentR(BaseAgent):
         )
         self.context_lines = context_lines
         self.enable_code_browser = enable_code_browser
+        self.result_store = ResultStore()
 
     def _invoke_llm(
         self,
@@ -700,12 +703,17 @@ class AgentR(BaseAgent):
     ) -> dict[str, Any]:
         """
         调用 LLM 对单条发现进行语义审查。
-
-        Args:
-            finding: 待审查的 SARIF 发现。
-            language: 目标语言，用于选择对应的系统提示和代码块语法高亮。
-            prompt_preset: Agent-T 指定的 prompt 预设（优先于 language）。
         """
+        sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
+        
+        # 缓存检查
+        cache_key_raw = f"{finding.rule_id}|{finding.code_context}|{sys_prompt}"
+        cache_key = hashlib.sha256(cache_key_raw.encode("utf-8")).hexdigest()
+        if cached := self.result_store.get_agent_r_cache(cache_key):
+            self.metrics.record_cache_hit()
+            logger.debug("[Agent-R] 缓存命中: %s", cache_key[:8])
+            return cached
+
         code_lang = _get_code_block_lang(language)
         human_msg = _REVIEW_TEMPLATE.format(
             rule_id=finding.rule_id,
@@ -715,14 +723,15 @@ class AgentR(BaseAgent):
             code_context=finding.code_context or "（源码上下文不可用）",
             code_lang=code_lang,
         )
-        sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
         _timeout_sec = int(os.environ.get("AGENT_R_TIMEOUT", "120"))
         raw = self.invoke_with_timeout(
             [SystemMessage(content=sys_prompt), HumanMessage(content=human_msg)],
             timeout_sec=_timeout_sec,
         )
         _flush_logs()
-        return self.parse_json(raw)
+        result = self.parse_json(raw)
+        self.result_store.set_agent_r_cache(cache_key, result)
+        return result
 
     def _invoke_llm_batch(
         self,
@@ -813,57 +822,75 @@ class AgentR(BaseAgent):
                     window=self.context_lines,
                 )
 
+        # 缓存检查与拆分
+        sys_prompt = _get_review_system_prompt(language, prompt_preset=prompt_preset)
+        verdicts: list[Any] = [None] * batch_size
+        uncached_findings = []
+        uncached_indices = []
+        uncached_keys = []
+        
+        for i, f in enumerate(batch_findings):
+            cache_key_raw = f"{f.rule_id}|{f.code_context}|{sys_prompt}"
+            cache_key = hashlib.sha256(cache_key_raw.encode("utf-8")).hexdigest()
+            if cached := self.result_store.get_agent_r_cache(cache_key):
+                self.metrics.record_cache_hit()
+                verdicts[i] = cached
+                logger.debug("[Agent-R] 批量审查中缓存命中: %s", cache_key[:8])
+            else:
+                uncached_findings.append(f)
+                uncached_indices.append(i)
+                uncached_keys.append(cache_key)
+
         # 批量 LLM 调用（含应用层重试，失败降级为逐条审查）
-        verdicts = None
-        try:
-            verdicts = self._invoke_llm_batch_with_retry(
-                batch_findings, language=language, prompt_preset=prompt_preset,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[Agent-R] 批量审查失败（重试用尽），降级为逐条审查: %s", exc,
-            )
+        if uncached_findings:
+            uncached_verdicts = None
+            try:
+                uncached_verdicts = self._invoke_llm_batch_with_retry(
+                    uncached_findings, language=language, prompt_preset=prompt_preset,
+                )
+                if uncached_verdicts and len(uncached_verdicts) == len(uncached_findings):
+                    for idx, v, ckey in zip(uncached_indices, uncached_verdicts, uncached_keys):
+                        verdicts[idx] = v
+                        self.result_store.set_agent_r_cache(ckey, v)
+                else:
+                    raise ValueError("LLM 返回的批量结果数量不匹配")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Agent-R] 批量审查失败（重试用尽或数量不匹配），降级为逐条审查: %s", exc,
+                )
 
-        if verdicts is None:
-            logger.info(
-                "[Agent-R] 降级模式: 逐条审查 %d 条 findings (批次 %d~%d)",
-                batch_size, batch_start_idx + 1, batch_start_idx + batch_size,
-            )
-            _flush_logs()
-            verdicts = []
-            for _fi, _f in enumerate(batch_findings):
-                try:
-                    _single = self._invoke_llm(_f, language=language, prompt_preset=prompt_preset)
-                    verdicts.append(_single)
-                    logger.info(
-                        "[Agent-R] 逐条 #%d %s (%.0f%%)",
-                        batch_start_idx + _fi + 1,
-                        _single.get("status", "uncertain").upper(),
-                        _single.get("confidence", 0) * 100,
-                    )
-                except Exception as _single_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[Agent-R] 逐条 #%d 也失败: %s",
-                        batch_start_idx + _fi + 1, _single_exc,
-                    )
-                    verdicts.append({
-                        "status": "uncertain",
-                        "confidence": 0.0,
-                        "engine_detected": "Unknown",
-                        "reasoning": f"LLM 异常(逐条降级也失败): {_single_exc}",
-                        "sink_method": "",
-                    })
+            if not uncached_verdicts or len(uncached_verdicts) != len(uncached_findings):
+                logger.info(
+                    "[Agent-R] 降级模式: 逐条审查 %d 条 findings", len(uncached_findings)
+                )
                 _flush_logs()
+                for f, orig_idx in zip(uncached_findings, uncached_indices):
+                    try:
+                        _single = self._invoke_llm(f, language=language, prompt_preset=prompt_preset)
+                        verdicts[orig_idx] = _single
+                    except Exception as _single_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[Agent-R] 逐条 #%d 也失败: %s", orig_idx + 1, _single_exc,
+                        )
+                        verdicts[orig_idx] = {
+                            "status": "uncertain",
+                            "confidence": 0.0,
+                            "engine_detected": "Unknown",
+                            "reasoning": f"LLM 异常(逐条降级也失败): {_single_exc}",
+                            "sink_method": "",
+                        }
+                    _flush_logs()
 
-        # 确保 verdicts 数量匹配
-        while len(verdicts) < batch_size:
-            verdicts.append({
-                "status": "uncertain",
-                "confidence": 0.0,
-                "engine_detected": "Unknown",
-                "reasoning": "LLM 未返回足够结果",
-                "sink_method": "",
-            })
+        # 确保 verdicts 数量匹配且没有 None
+        for i in range(batch_size):
+            if verdicts[i] is None:
+                verdicts[i] = {
+                    "status": "uncertain",
+                    "confidence": 0.0,
+                    "engine_detected": "Unknown",
+                    "reasoning": "LLM 未返回足够结果",
+                    "sink_method": "",
+                }
 
         results = []
         for i, (finding, verdict) in enumerate(zip(batch_findings, verdicts)):

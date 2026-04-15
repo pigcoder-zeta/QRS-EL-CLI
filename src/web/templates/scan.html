@@ -88,7 +88,7 @@
         </div>
         <div>
           <label class="form-label">最低置信度</label>
-          <input id="input-confidence" class="form-input" type="number" value="0.5" min="0" max="1" step="0.1" />
+          <input id="input-confidence" class="form-input" type="number" value="0.6" min="0" max="1" step="0.1" />
         </div>
         <div>
           <label class="form-label">Agent-E 远程地址 <span class="text-gray-600">(留空用 Docker)</span></label>
@@ -278,7 +278,6 @@ function getConfig() {
     source_dir: !isGithub ? document.getElementById('input-source-dir').value : undefined,
     language: document.getElementById('input-language').value,
     vuln_types: vulnTypes.length > 0 ? vulnTypes : undefined,
-    vuln_type: vulnTypes.length === 0 ? 'sql injection' : undefined,
     sink_hints: document.getElementById('input-sink-hints').value || undefined,
     max_retries: parseInt(document.getElementById('input-retries').value),
     parallel_workers: parseInt(document.getElementById('input-workers').value),

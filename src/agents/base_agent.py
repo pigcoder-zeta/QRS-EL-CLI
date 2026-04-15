@@ -42,6 +42,7 @@ class AgentMetrics:
     llm_errors: int = 0
     llm_total_latency: float = 0.0
     llm_total_tokens: int = 0
+    cache_hits: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record_call(self, latency: float, tokens: int = 0, success: bool = True) -> None:
@@ -51,6 +52,10 @@ class AgentMetrics:
             self.llm_total_tokens += tokens
             if not success:
                 self.llm_errors += 1
+                
+    def record_cache_hit(self) -> None:
+        with self._lock:
+            self.cache_hits += 1
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -63,6 +68,7 @@ class AgentMetrics:
                 "avg_latency_sec": round(avg, 2),
                 "total_latency_sec": round(self.llm_total_latency, 2),
                 "total_tokens": self.llm_total_tokens,
+                "cache_hits": self.cache_hits,
             }
 
 

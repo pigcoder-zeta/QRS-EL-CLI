@@ -136,6 +136,7 @@ class PipelineState:
     poc_results: list[PoCResult] = field(default_factory=list)
     verification_results: list[VerificationResult] = field(default_factory=list)
     completed_phases: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     error: Optional[str] = None                 # 非空时表示该次扫描失败
     # Patch-Aware 模式
     patch_commit: str = ""                      # 修复补丁 commit hash
@@ -200,6 +201,7 @@ class PipelineState:
             "query_path": self.query_path,
             "sarif_path": self.sarif_path,
             "completed_phases": self.completed_phases,
+            "warnings": self.warnings,
             "error": self.error,
             "patch_commit": self.patch_commit,
             "hotspot_functions": self.hotspot_functions,
@@ -236,6 +238,7 @@ class PipelineState:
         state.query_path = data.get("query_path")
         state.sarif_path = data.get("sarif_path")
         state.completed_phases = data.get("completed_phases", [])
+        state.warnings = data.get("warnings", [])
         state.error = data.get("error")
         state.patch_commit = data.get("patch_commit", "")
         state.hotspot_functions = data.get("hotspot_functions", {})
@@ -479,6 +482,24 @@ class Coordinator:
                 self.agent_r.context_lines = profile.context_window
                 logger.info("[Phase 0.5] Agent-T 调整上下文窗口=%d", profile.context_window)
 
+            if profile.recommended_vuln_types:
+                logger.info(
+                    "[Phase 0.5] Agent-T 推荐漏洞类型: %s（当前扫描: %s）",
+                    profile.recommended_vuln_types, self.config.vuln_type,
+                )
+                if self.config.vuln_type not in profile.recommended_vuln_types:
+                    logger.warning(
+                        "[Phase 0.5] ⚠ 当前漏洞类型 '%s' 不在 Agent-T 推荐列表中，"
+                        "扫描效果可能受限。建议类型: %s",
+                        self.config.vuln_type,
+                        ", ".join(profile.recommended_vuln_types[:5]),
+                    )
+                    state.warnings.append(
+                        f"Agent-T 认为此代码库({profile.codebase_type})的"
+                        f"推荐漏洞类型为 {', '.join(profile.recommended_vuln_types[:5])}，"
+                        f"但当前扫描的是 '{self.config.vuln_type}'。"
+                    )
+
             state.completed_phases.append("triage")
             logger.info(
                 "[Phase 0.5] Agent-T 完成 | 类型=%s | 置信度=%.0f%% | %s",
@@ -719,14 +740,13 @@ class Coordinator:
                 output_sarif=sarif_path,
             )
         if not success:
-            # analyze 失败通常是因为目标项目不含该框架的依赖（如在非 Spring 项目上
-            # 运行 Spring EL 查询）。这种情况视为"0 发现"而非整体失败，
-            # 允许其他漏洞类型的并行扫描继续正常完成。
-            logger.warning(
-                "[Phase 3] CodeQL 扫描未能完成（项目可能不含相关框架依赖）。"
-                "将此次扫描视为 0 发现，继续其余流程。"
+            warn_msg = (
+                "[Phase 3] CodeQL analyze 失败！"
+                "可能原因：查询与数据库不匹配、QL 包依赖缺失、内存不足等。"
+                "已降级为 0 发现继续流程，但结果可能不可靠。"
             )
-            # 写入空 SARIF，让后续阶段可以正常读取
+            logger.error(warn_msg)
+            state.warnings.append(warn_msg)
             import json as _json
             empty_sarif = {
                 "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -738,20 +758,35 @@ class Coordinator:
 
         state.sarif_path = sarif_path
         state.completed_phases.append("analyze")
-        logger.info("[Phase 3] 扫描完成: %s", sarif_path)
 
-        # ── Phase 3.5：规则归档（仅在 SARIF 有真实发现时写入 RAG 记忆库）────
+        # 统计 SARIF 原始 finding 数量
+        _sarif_finding_count = 0
         _has_findings = False
         if sarif_path and Path(sarif_path).exists():
             try:
                 import json as _json_check
                 _sarif_data = _json_check.loads(Path(sarif_path).read_text(encoding="utf-8"))
                 for run in _sarif_data.get("runs", []):
-                    if run.get("results"):
+                    cnt = len(run.get("results", []))
+                    _sarif_finding_count += cnt
+                    if cnt > 0:
                         _has_findings = True
-                        break
             except Exception:
                 pass
+
+        if success:
+            logger.info("[Phase 3] 扫描完成: %s | SARIF 原始发现: %d 条", sarif_path, _sarif_finding_count)
+        else:
+            logger.error("[Phase 3] 扫描降级完成（analyze 失败，使用空 SARIF）: %s", sarif_path)
+
+        if _sarif_finding_count == 0 and success:
+            warn_msg = (
+                "[Phase 3] CodeQL 扫描成功但发现 0 条告警——"
+                "可能是 Agent-Q 生成的查询未匹配到目标代码中的 sink/source。"
+            )
+            logger.warning(warn_msg)
+            state.warnings.append(warn_msg)
+
         if self.rule_memory and state.query_path and _has_findings:
             try:
                 from src.utils.vuln_catalog import find as _vuln_find
@@ -813,14 +848,29 @@ class Coordinator:
             prompt_preset=self.config.prompt_preset,
         )
 
+        # 审查指标统计
+        status_dist = {}
+        for r in all_results:
+            key = r.status.value if hasattr(r.status, "value") else str(r.status)
+            status_dist[key] = status_dist.get(key, 0) + 1
+        zero_conf_count = sum(1 for r in all_results if r.confidence == 0.0)
+
         filtered = [
             r for r in all_results
-            if r.confidence >= self.config.agent_r_min_confidence
+            if r.status == VulnStatus.VULNERABLE
+            or r.confidence >= self.config.agent_r_min_confidence
         ]
-        if len(filtered) < len(all_results):
+        dropped = len(all_results) - len(filtered)
+
+        logger.info(
+            "[Phase 4] Agent-R 审查完成 | 输入: %d 条 | 状态分布: %s | "
+            "零置信度(LLM错误): %d 条 | 置信度过滤丢弃: %d 条 | 最终保留: %d 条",
+            len(all_results), status_dist, zero_conf_count,
+            dropped, len(filtered),
+        )
+        if dropped > 0:
             logger.info(
-                "[Phase 4] 置信度过滤：%d → %d 条（阈值 %.0f%%）",
-                len(all_results), len(filtered),
+                "[Phase 4] 置信度阈值 %.0f%%（vulnerable 状态始终保留，不受阈值影响）",
                 self.config.agent_r_min_confidence * 100,
             )
 
@@ -833,6 +883,9 @@ class Coordinator:
             payload={
                 "phase": "review",
                 "total_findings": len(filtered),
+                "total_input": len(all_results),
+                "dropped": dropped,
+                "status_distribution": status_dist,
                 "confirmed_vulns": vuln_count,
                 "vuln_type": self.config.vuln_type,
             },
@@ -1103,6 +1156,9 @@ class Coordinator:
             len(state.vulnerable_findings),
             dyn_confirmed,
         )
+        if state.warnings:
+            for w in state.warnings:
+                logger.warning("⚠ Pipeline 告警: %s", w)
 
         self._log_agent_metrics()
         return state

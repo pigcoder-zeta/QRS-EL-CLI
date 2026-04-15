@@ -92,8 +92,60 @@ class ScanManager:
             "started_at": task.started_at,
         }
 
+    # 后端 completed_phases 值 → 前端 phase key 的映射
+    _PHASE_MAP = {
+        "clone_repo":      "clone",
+        "triage":          "clone",       # 分诊归入"克隆+分诊"
+        "create_database": "database",
+        "generate_query":  "synthesis",
+        "analyze":         "scan",
+        "review":          "scan",        # 审查归入"扫描+审查"
+        "generate_poc":    "verify",
+        "verify":          "verify",
+    }
+
     def _push(self, task: ScanTask, event: str, data: dict):
         task.event_queue.put({"event": event, "data": data})
+
+    def _run_with_phase_tracking(self, coord, task: ScanTask):
+        """在子线程中运行 Coordinator，主线程轮询 completed_phases 推送 SSE。"""
+        holder: list = []
+        err_holder: list = []
+
+        def _target():
+            try:
+                holder.append(coord.run())
+            except Exception as exc:
+                err_holder.append(exc)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+
+        seen_phases: set[str] = set()
+
+        def _flush_phases():
+            state = coord.active_state
+            if state is None:
+                return
+            for phase_key in list(state.completed_phases):
+                if phase_key not in seen_phases:
+                    seen_phases.add(phase_key)
+                    fe_key = self._PHASE_MAP.get(phase_key, phase_key)
+                    self._push(task, "phase_complete", {
+                        "phase": fe_key,
+                        "backend_phase": phase_key,
+                    })
+
+        while t.is_alive():
+            t.join(timeout=0.3)
+            _flush_phases()
+
+        t.join()
+        _flush_phases()
+
+        if err_holder:
+            raise err_holder[0]
+        return holder[0] if holder else None
 
     def _run_scan(self, task: ScanTask):
         handler = _QueueLogHandler(task.event_queue)
@@ -105,15 +157,16 @@ class ScanManager:
             task.status = "running"
             cfg = task.config
             language = cfg.get("language", "java")
-            vuln_types = cfg.get("vuln_types", [])
-            if not vuln_types:
-                vuln_types = [cfg.get("vuln_type", "sql injection")]
+            vuln_types = cfg.get("vuln_types") or []
 
             from src.orchestrator.coordinator import Coordinator, PipelineConfig
+            import dataclasses
+
+            use_auto_planner = not vuln_types
 
             base_config = PipelineConfig(
                 language=language,
-                vuln_type=vuln_types[0],
+                vuln_type=vuln_types[0] if vuln_types else "_auto_",
                 source_dir=cfg.get("source_dir"),
                 github_url=cfg.get("github_url"),
                 sink_hints=cfg.get("sink_hints"),
@@ -125,23 +178,57 @@ class ScanManager:
                 agent_e_host=cfg.get("agent_e_host"),
                 enable_rule_memory=cfg.get("enable_rule_memory", True),
                 build_mode="none" if cfg.get("no_build") else "",
-                agent_r_min_confidence=float(cfg.get("min_confidence", 0.5)),
+                agent_r_min_confidence=float(cfg.get("min_confidence", 0.6)),
                 prompt_preset="generic" if cfg.get("force_generic_prompt") else cfg.get("prompt_preset", ""),
-                agent_r_context_lines=int(cfg.get("agent_r_context_lines", 30)),
+                agent_r_context_lines=int(cfg.get("agent_r_context_lines") or cfg.get("context_lines") or 30),
                 enable_code_browser=cfg.get("enable_code_browser", True),
             )
 
-            self._push(task, "phase_start", {"phase": "pipeline", "total": len(vuln_types)})
+            if use_auto_planner:
+                self._push(task, "phase_start", {"phase": "auto_planner", "total": 0})
+                logger.info("[Web] 未指定漏洞类型，启用 Agent-P 自主扫描模式")
 
-            if len(vuln_types) > 1:
+                if base_config.github_url and not base_config.source_dir:
+                    logger.info("[Web] GitHub 模式: 先克隆仓库获取 source_dir")
+                    from src.orchestrator.coordinator import PipelineState as _PS
+                    _clone_coord = Coordinator(config=base_config)
+                    _clone_state = _PS(vuln_type="_auto_")
+                    _clone_coord._phase_clone_repo(_clone_state)
+                    self._push(task, "phase_complete", {"phase": "clone", "backend_phase": "clone_repo"})
+                    base_config = dataclasses.replace(
+                        base_config,
+                        source_dir=_clone_state.source_dir,
+                        github_url=None,
+                    )
+
+                auto_result = Coordinator.run_with_planner(base_config)
+                states = auto_result.get("all_states", [])
+
+                plan_info = auto_result.get("scan_plan")
+                if plan_info:
+                    planned_types = [t.vuln_type for t in getattr(plan_info, "tasks", [])]
+                    self._push(task, "intermediate", {
+                        "type": "auto_plan",
+                        "planned_vuln_types": planned_types,
+                        "rounds": auto_result.get("rounds_completed", 0),
+                    })
+                    logger.info("[Web] Agent-P 规划的漏洞类型: %s", planned_types)
+
+            elif len(vuln_types) > 1:
+                self._push(task, "phase_start", {"phase": "pipeline", "total": len(vuln_types)})
                 states = Coordinator.run_parallel(
                     base_config=base_config,
                     vuln_types=vuln_types,
                     max_workers=int(cfg.get("parallel_workers", 3)),
                 )
             else:
+                self._push(task, "phase_start", {"phase": "pipeline", "total": 1})
                 coord = Coordinator(config=base_config)
-                states = [coord.run()]
+                states = [self._run_with_phase_tracking(coord, task)]
+
+            states = [s for s in states if s is not None]
+            if not states:
+                raise RuntimeError("Coordinator 未返回任何结果")
 
             # 推送审查摘要
             total_v = sum(len(s.vulnerable_findings) for s in states)
@@ -153,6 +240,16 @@ class ScanManager:
                 ),
             })
 
+            # 推送 pipeline 告警（analyze 失败、0 发现等）
+            all_warnings = []
+            for s in states:
+                all_warnings.extend(getattr(s, "warnings", []))
+            if all_warnings:
+                self._push(task, "intermediate", {
+                    "type": "pipeline_warnings",
+                    "warnings": all_warnings,
+                })
+
             # 导出报告
             from src.utils.result_exporter import export_json
             results_dir = _PROJECT_ROOT / "data" / "results"
@@ -162,10 +259,19 @@ class ScanManager:
             export_json(states, report_path, language=language)
 
             task.result_file = report_name
-            task.status = "completed"
+            has_errors = any(s.error for s in states)
+            has_warnings = bool(all_warnings)
+            if has_errors:
+                task.status = "completed_with_errors"
+            elif has_warnings:
+                task.status = "completed_with_warnings"
+            else:
+                task.status = "completed"
             self._push(task, "complete", {
-                "status": "success",
+                "status": "success" if not has_errors else "partial",
                 "result_file": report_name,
+                "warnings": all_warnings if has_warnings else [],
+                "has_errors": has_errors,
             })
 
         except Exception as exc:
