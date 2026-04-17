@@ -24,12 +24,9 @@ load_dotenv()
 from flask import (
     Flask,
     Response,
-    redirect,
     jsonify,
-    render_template,
     request,
     send_file,
-    url_for,
 )
 
 from src.utils.ql_template_library import QLTemplateLibrary, _ALL_TEMPLATES
@@ -152,39 +149,6 @@ def _set_security_headers(response):
 
 
 # ---------------------------------------------------------------------------
-# 页面路由
-# ---------------------------------------------------------------------------
-
-@app.route("/")
-def page_root():
-    return redirect(url_for("page_scan"))
-
-
-@app.route("/scan")
-def page_scan():
-    return render_template("scan.html")
-
-
-@app.route("/results/<path:filename>")
-def page_result_detail(filename: str):
-    return render_template("results.html", filename=filename)
-
-
-@app.route("/templates")
-def page_templates():
-    return render_template("templates.html")
-
-
-@app.route("/memory")
-def page_memory():
-    return render_template("memory.html")
-
-
-@app.route("/benchmark")
-def page_benchmark():
-    return render_template("benchmark.html")
-
-
 # ---------------------------------------------------------------------------
 # API — 扫描
 # ---------------------------------------------------------------------------

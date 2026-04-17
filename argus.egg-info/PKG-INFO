@@ -1,0 +1,535 @@
+Metadata-Version: 2.4
+Name: argus
+Version: 2.4.0
+Summary: 多 Agent 协同的 CodeQL 规则自动生成与漏洞检测系统
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: langchain>=0.2.0
+Requires-Dist: langchain-openai>=0.1.0
+Requires-Dist: langchain-core>=0.2.0
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: sarif-tools>=2.0.0
+Requires-Dist: tenacity>=8.3.0
+Requires-Dist: rich>=13.7.0
+Requires-Dist: GitPython>=3.1.40
+Requires-Dist: scikit-learn>=1.4.0
+Requires-Dist: pyyaml>=6.0.0
+Requires-Dist: flask>=3.0.0
+Provides-Extra: rag
+Requires-Dist: chromadb>=0.5.0; extra == "rag"
+Requires-Dist: faiss-cpu>=1.8.0; extra == "rag"
+Requires-Dist: sentence-transformers>=2.7.0; extra == "rag"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
+Requires-Dist: ruff>=0.4.0; extra == "dev"
+Requires-Dist: mypy>=1.10.0; extra == "dev"
+
+# Argus 系统架构文档（底层引擎：QRSE-X）
+
+**版本**: v2.6  
+**更新日期**: 2026-04-07  
+**论文来源**: arXiv:2602.09774 《QRS: A Rule-Synthesizing Neuro-Symbolic Triad for Autonomous Vulnerability Discovery》
+
+---
+
+## 1. 系统概述
+
+**Argus** 是一个**多 Agent 协同的自动化安全检测系统**。`--language` 在 CLI 中可选 **java / python / javascript / go / csharp / cpp**；**Solidity** 在 Web 扫描页与 Agent-Q 的 LLM 路径中支持（实验性 CodeQL Solidity）。通用漏洞类型由 `src/utils/vuln_catalog.py` 中的目录（约 **41** 条 `VulnEntry`）驱动规划与提示；另可通过 **`--external-sarif`** 接入 IaC/第三方 SARIF，**`--sca`** 做供应链（OSV 等）分析，**`--firmware`** 走二进制/固件辅助流水线（依赖本机 Binwalk/Ghidra 等工具）。
+
+系统将大语言模型（LLM）的语义理解能力与 CodeQL 静态分析引擎的精确性深度融合，实现从「输入 GitHub URL」到「输出漏洞研判报告」的全自动闭环，无需手动编写任何检测规则。
+
+### v2.5 新增：Agent-P 元决策层（自主模式）
+
+v2.5 引入 **Agent-P（Planner Agent）** 作为系统的元决策层，让系统从固定流水线进化为真正的自主多 Agent 系统：
+
+```
+用户输入仓库 URL
+       │
+       ▼
+┌─── Agent-P（元决策层）───────────────────────────┐
+│  侦察 → 规划 → 执行编排 → 评估 → 自适应循环      │
+│                                                   │
+│  自动推断语言 / 框架 / 高风险依赖                  │
+│  从 vuln_catalog 中智能选择 3~10 种漏洞类型        │
+│  每轮扫描后评估质量，决定 继续/重扫/终止           │
+└──────────────────────┬────────────────────────────┘
+                       │ 扫描计划
+                       ▼
+┌─── 执行层（现有 Agent）──────────────────────────┐
+│  Agent-Q → CodeQL → Agent-R → Agent-S → Agent-E  │
+└──────────────────────────────────────────────────┘
+```
+
+**使用方式**：`python -m src.main --source-dir ./target --auto`
+
+Agent-P 的三大能力：
+
+| 能力 | 说明 | LLM 调用次数 |
+|---|---|---|
+| 侦察（Recon） | 语言统计、框架检测、高风险依赖扫描、HTTP 入口点提取 | 0（纯规则） |
+| 规划（Plan） | 基于侦察报告 + vuln_catalog，LLM 选择最优漏洞类型并排优先级 | 1 次 |
+| 评估（Evaluate） | 每轮扫描后汇总结果，LLM 决策 CONTINUE/RESCAN/STOP | 每轮 1 次 |
+
+### v2.4 全领域安全检测矩阵
+
+| 领域 | 典型问题 | 技术方案 | 实现状态 |
+|---|---|---|---|
+| 注入漏洞 | SQL/命令/表达式注入、SSRF、XSS、路径穿越 | CodeQL 污点追踪 | ✅ 已完成 |
+| 密码学缺陷 | 弱加密算法、硬编码凭证、不安全随机数、不安全TLS | CodeQL 模式匹配 | ✅ 已完成 |
+| 内存安全(C/C++) | 缓冲区溢出、整数溢出→malloc、不安全字符串函数 | CodeQL 模式匹配 + 本地数据流 | ✅ 已完成 |
+| 资源管理 | 文件/连接/Socket未关闭、内存泄露 | CodeQL 模式匹配 | ✅ 已完成 |
+| 并发安全 | 竞态条件(TOCTOU)、不安全的共享状态 | CodeQL 模式匹配 | ✅ 已完成 |
+| 信息泄露 | 堆栈跟踪泄露、敏感数据暴露 | CodeQL 污点追踪 | ✅ 已完成 |
+| IaC 配置安全 | Terraform/K8s/Docker 错误配置 | 外部 SARIF 接入 (--external-sarif) | ✅ 已完成 |
+| 移动安全(Android) | Intent 劫持、明文存储、WebView RCE、ContentProvider 泄露 | CodeQL Java + Android 专用查询 | ✅ 已完成 |
+| 供应链安全(SCA) | 已知 CVE 依赖、Typosquatting 恶意包 | 包元数据解析 + OSV.dev API (--sca) | ✅ 已完成 |
+| 智能合约(Solidity) | 重入攻击、未检查返回值、整数溢出、tx.origin | CodeQL 实验性 Solidity 支持 | ✅ 已完成 |
+| 二进制/固件 | 危险函数导入、缓冲区溢出、固件提取分析 | Binwalk + Ghidra/Radare2 → SARIF (--firmware) | ✅ 已完成 |
+
+### 1.1 核心设计原则
+
+| 原则 | 说明 |
+|---|---|
+| **自主决策** | Agent-P 元决策层自动侦察、规划、评估，用户无需指定扫什么 |
+| **神经符号融合** | LLM 负责语义理解与代码生成，CodeQL 负责精确的静态分析 |
+| **多范式查询** | 污点追踪（注入类）+ 模式匹配（密码学/配置类）+ 本地数据流（内存安全类） |
+| **自修复闭环** | 编译失败时将报错信息反馈给 LLM 自动修复，最多重试 3 次 |
+| **自适应循环** | Agent-P 每轮扫描后评估质量，动态决定继续/重扫/终止 |
+| **模板优先** | 已验证的 QL 模板优先于 LLM 生成，大幅提升首次成功率 |
+| **批量审查** | Agent-R 支持 `--agent-r-workers` 与 `--agent-r-batch`（多 finding / 次调用） |
+| **增量缓存** | 基于 Git commit hash 跳过重复建库，节省 2-3 分钟 |
+| **规则记忆** | `RuleMemory`（ChromaDB→…→Jaccard 多级后端）归档成功 `.ql`，为 Agent-Q 提供 Few-Shot |
+| **动态验证** | Agent-S 生成 PoC + Agent-E（Docker 或 `--agent-e-host` Remote）最多 5 轮迭代精化 |
+
+---
+
+## 2. 系统架构
+
+### 2.1 完整工作流
+
+```
+用户输入（GitHub URL / 本地目录；可选 --auto 走 Agent-P）
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Coordinator：Phase 0 克隆 + 构建探测 +（可选）Patch-Aware      │
+│ Phase 0.5（可选）Agent-T 分诊 — Web 勾选 enable_agent_t 或     │
+│            与 Agent-P 自主模式内建；默认 CLI 单任务不启用       │
+└────────────────────────────┬─────────────────────────────────┘
+                             ▼
+Phase 1   建 CodeQL 库（Git Hash 缓存 / --codeql-db 预建库 / --no-build）
+                             ▼
+Phase 2   Agent-Q：QLTemplateLibrary（约 34 个内置模板）+ RuleMemory Few-Shot
+          + LLM 生成；codeql query compile 自修复（默认最多 3 次）
+                             ▼
+Phase 3   CodeQL analyze → SARIF（并行多漏洞时类级锁串行化 analyze）
+                             ▼
+Phase 3.5 成功规则写入 RuleMemory（可 --no-rule-memory 关闭）
+                             ▼
+Phase 4   Agent-R：SARIF + 源码上下文（CodeBrowser 可 --no-code-browser 关闭）
+                             ▼
+Phase 5   Agent-S：对判定为漏洞的 finding 生成 PoC（可 --no-agent-s）
+                             ▼
+Phase 6   Agent-E：Docker 或 Remote（--agent-e-host）验证 + 最多 5 轮 refine（可 --no-agent-e）
+                             ▼
+导出 JSON/HTML；Web Dashboard 可查看历史与记忆库
+```
+
+**并行模式**：`--vuln-types A B C` 或 Agent-P 计划多任务时，`run_parallel()` **建库一次**，Phase 2 起按漏洞类型分线程执行（Phase 3 analyze 仍全局串行以避免 CodeQL 锁冲突）。
+
+### 2.2 数据流向
+
+```
+GitHub URL
+  → [GithubRepoManager]   克隆仓库（depth=1），探测 pom.xml / build.gradle
+  → [DatabaseCache]       查询 Git Hash 缓存，命中则跳过建库
+  → [CodeQLRunner]        codeql database create（Maven/Gradle/autobuild）
+  → [QLTemplateLibrary]   查询已验证 QL 模板（命中直接使用）
+  → [AgentQ + LLM]        生成/修复 .ql 规则 → codeql query compile
+  → [CodeQLRunner]        codeql database analyze → SARIF
+  → [AgentR + LLM]        解析 SARIF → CodeBrowser/行窗口上下文 → 语义研判
+  → [AgentS + LLM]        （可选）PoC 生成
+  → [AgentE]              （可选）Docker/Remote 动态验证与迭代精化
+  → [export_json / export_html] 与扫描历史（ScanHistory）
+```
+
+---
+
+## 3. 模块详细说明
+
+### 3.1 `src/utils/codeql_runner.py` — CodeQL CLI 封装
+
+| 方法 | 说明 |
+|---|---|
+| `create_database(source_dir, db_path, language, build_command?)` | 建立 CodeQL 数据库，可选传入构建命令 |
+| `install_query_pack(query_dir)` | `codeql pack install`，下载 qlpack 依赖 |
+| `compile_query(query_path)` | 编译验证 .ql 文件，返回 `(success, stderr)` |
+| `analyze(db_path, query_path, output_sarif)` | 运行扫描，输出 SARIF |
+
+**关键设计**：所有调用通过私有 `_run()` 方法统一处理超时（`subprocess.TimeoutExpired`）、可执行文件缺失（`FileNotFoundError`）、OS 错误三类异常。
+
+---
+
+### 3.2 `src/utils/repo_manager.py` — 仓库管理器
+
+| 方法 | 说明 |
+|---|---|
+| `clone_repo(repo_url, dest_dir)` | 浅克隆（depth=1），线程超时控制，幂等设计 |
+| `detect_build_command(repo_path, language)` | 探测 pom.xml / build.gradle，返回构建命令 |
+| `get_repo_head_hash(repo_path)` | 返回 HEAD commit 的前 12 位 hash |
+| `cleanup(repo_path)` | 安全删除克隆目录 |
+
+**构建探测规则**：
+
+| 文件 | 返回命令 |
+|---|---|
+| `pom.xml` | `mvn clean install -DskipTests` |
+| `build.gradle` / `build.gradle.kts` | `gradle build -x test` |
+| 均无 / Python | `""` （CodeQL autobuild） |
+
+---
+
+### 3.3 `src/utils/db_cache.py` — 数据库增量缓存
+
+**缓存键**：`<repo_url>#<commit_hash>`  
+**存储格式**：`data/databases/cache_index.json`
+
+```json
+{
+  "https://github.com/xxx/yyy#a1b2c3d4e5f6": "data/databases/db_20260328_173639_1f33d6"
+}
+```
+
+**命中条件**：相同 URL + 相同 commit hash + 数据库目录仍存在。重复扫描同一版本代码时，**Phase 1 直接跳过**，节省 Maven/Gradle 构建时间。
+
+---
+
+### 3.4 `src/utils/ql_template_library.py` — QL 模板知识库
+
+存储经过本地 `codeql query compile` 实际验证的黄金模板（`_ALL_TEMPLATES` 共 **34** 条）。Agent-Q 优先命中此库，LLM 仅在无模板匹配时才从零生成。
+
+**代表性模板（节选）**：
+
+| 模板 Key | 漏洞类型 | 说明 |
+|---|---|---|
+| `java/spring-el-injection` | Spring SpEL | `ExpressionParser.parseExpression` 等 |
+| `java/ognl-injection` | OGNL | `Ognl.getValue` / `parseExpression` |
+| `java/mvel-injection` | MVEL | `MVEL.eval` 等 |
+| `java/el-injection` | Java 表达式注入（综合） | 多 Sink 合并 |
+| 另有 Java/Python/JS/Go/C#/C++ 的 SQLi、命令注入、路径穿越、SSRF、XSS（部分语言）、C++ 缓冲溢出等 | | 见 `python -m src.main --list-templates` |
+
+**关键依赖**（已验证路径，基于 `codeql/java-all@9.0.2`）：
+```ql
+import java
+import semmle.code.java.dataflow.TaintTracking
+import semmle.code.java.dataflow.DataFlow
+import semmle.code.java.dataflow.FlowSources   ← RemoteFlowSource 在此
+```
+
+---
+
+### 3.5 `src/agents/agent_q.py` — 规则合成 Agent
+
+**核心算法：模板优先 + 自修复循环**
+
+```
+generate_and_compile(language, vuln_type)
+  │
+  ├─ 1. 查询 QLTemplateLibrary
+  │      命中 → 直接使用已验证代码（跳过 LLM 初始生成）
+  │      未命中 → LLM 基于黄金模板 Prompt 生成
+  │
+  ├─ 2. 写入 data/queries/<language>/<filename>.ql
+  │      + 自动创建 qlpack.yml（声明 codeql/java-all 依赖）
+  │      + 自动执行 codeql pack install
+  │
+  └─ 3. 自修复循环（最多 MAX_RETRIES=3 次）
+         codeql query compile
+           成功 → 返回文件路径 ✅
+           失败 → stderr 反馈给 LLM → 覆写文件 → 再次编译
+```
+
+**Prompt 策略**：System Prompt 内嵌经过验证的「黄金模板」和 6 条关键规则（正确 import 路径、禁用废弃 API、正确类型名等），将 LLM 自由度限定在 Sink 逻辑的填充上。
+
+---
+
+### 3.6 `src/agents/agent_r.py` — 语义审查 Agent
+
+**工作流**：
+1. 解析 SARIF JSON，提取每条发现的文件路径 + 行号 + 消息
+2. 构建上下文：默认启用 **CodeBrowser**（`src/utils/code_browser.py`）做符号/调用链增强；窗口行数由 `PipelineConfig.agent_r_context_lines` 控制（Web 扫描配置或代码中传入；CLI 未单独暴露该参数）；`--no-code-browser` 可关闭 CodeBrowser 并回退为简单行窗口
+3. 支持 **`agent_r_batch`**：多条 finding 合并为一次 LLM 调用；**`agent_r_workers`** 控制并发线程数
+4. 解析返回的结构化 JSON 研判结论
+
+**EL 注入专有审查维度**：
+
+| 维度 | 说明 |
+|---|---|
+| 执行上下文 | `SimpleEvaluationContext`（安全）vs `StandardEvaluationContext`（危险） |
+| 净化器识别 | 是否存在正则白名单、黑名单关键词过滤 |
+| 执行逻辑 | 用户输入是被完整求值，还是仅作字面量安全拼接 |
+| 权限控制 | 接口是否需要高权限访问（影响风险等级） |
+
+**输出结构**：
+
+```json
+{
+  "status": "vulnerable | safe | uncertain",
+  "confidence": 0.95,
+  "engine_detected": "Spring EL",
+  "reasoning": "输入未净化直接进入 StandardEvaluationContext...",
+  "sink_method": "org.springframework.expression.ExpressionParser.parseExpression"
+}
+```
+
+---
+
+### 3.7 `src/agents/agent_s.py` — PoC 生成 Agent
+
+对已判定为漏洞的 finding 生成 HTTP 级 PoC；与 **Agent-E** 配合时可 **`refine_poc()`**，根据验证反馈迭代改进（Coordinator 内最多 **5** 轮）。
+
+### 3.8 `src/agents/agent_e.py` — 沙箱执行 Agent
+
+在 **Docker** 中构建/运行目标并发送 PoC，或通过 **`agent_e_host`** 对已运行的服务做 **Remote** 验证。验证结果写回 `PoCResult.verification_result`，用于区分动态确认与仅静态研判。
+
+### 3.9 `src/agents/agent_t.py` / `src/agents/agent_p.py` — 分诊与自主规划
+
+- **Agent-T**：输出 `CodebaseProfile`，调整 `prompt_preset`、`agent_r_context_lines` 等。在 **`PipelineConfig.enable_agent_t=True`** 时于 Phase 0.5 运行；**默认 False**（普通 CLI 单次扫描不跑分诊）。**Agent-P**（`--auto`）在自主流程内会调用 Agent-T。
+- **Agent-P**：`Coordinator.run_with_planner()` — 侦察 → LLM 规划漏洞类型列表 → 循环执行 Coordinator → LLM 评估 CONTINUE/RESCAN/STOP。入口：`python -m src.main --source-dir ... --auto`（需已配置 API Key；语言可由侦察推断）。
+
+### 3.10 `src/utils/rule_memory.py` — 规则记忆库（RAG）
+
+成功规则归档至 `data/rule_memory/`（向量后端按依赖自动选择：ChromaDB / FAISS / sentence-transformers / TF-IDF / Jaccard）。CLI 支持 `--show-memory`、`--search-memory`、`--export-memory`、`--import-memory`；导入路径含 **HMAC** 与 **ql_hash** 等校验逻辑（见源码注释）。
+
+### 3.11 `src/web/app.py` — Web Dashboard
+
+Flask 应用：`python -m src.web.app`（默认 `127.0.0.1:5000`）。提供控制台、扫描向导、结果详情、模板列表、记忆库、Benchmark 等页面；扫描任务由 `src/web/scan_manager.py` 与 Coordinator 对接。
+
+### 3.12 `src/orchestrator/coordinator.py` — 调度中心
+
+```python
+PipelineConfig(
+    github_url="https://github.com/...",  # 或 source_dir
+    language="java",
+    vuln_type="Spring EL Injection",
+    enable_agent_r=True,
+    agent_r_min_confidence=0.6,
+    enable_agent_s=True,
+    enable_agent_e=True,
+    enable_rule_memory=True,
+    enable_agent_t=False,  # Web 或自主模式可开
+    enable_code_browser=True,
+    external_sarif=None,   # 非空则跳过 Agent-Q + CodeQL，直进 Agent-R
+    # ... 详见类定义
+)
+```
+
+`PipelineState` 除 SARIF 与 `review_results` 外，还包含 **`poc_results`**、**`verification_results`** 等；**`vulnerable_findings`**、**`confirmed_poc_results`** 为派生属性。
+
+---
+
+## 4. 项目目录结构
+
+```
+reV/
+├── architecture.md
+├── paper.md
+├── requirements.txt
+├── .env / .env.example
+│
+├── src/
+│   ├── main.py                 ← CLI（健康检查、记忆库子命令、扫描、--auto）
+│   ├── agents/
+│   │   ├── agent_q.py          ← 规则合成
+│   │   ├── agent_r.py          ← 语义审查
+│   │   ├── agent_s.py          ← PoC 生成
+│   │   ├── agent_e.py          ← 动态验证
+│   │   ├── agent_t.py          ← 代码库分诊
+│   │   └── agent_p.py          ← 自主规划（元 Agent）
+│   ├── orchestrator/
+│   │   └── coordinator.py      ← Pipeline + run_parallel + run_with_planner
+│   ├── utils/
+│   │   ├── codeql_runner.py
+│   │   ├── repo_manager.py
+│   │   ├── db_cache.py
+│   │   ├── ql_template_library.py
+│   │   ├── rule_memory.py
+│   │   ├── code_browser.py
+│   │   ├── vuln_catalog.py
+│   │   ├── dependency_analyzer.py
+│   │   ├── binary_adapter.py
+│   │   ├── html_reporter.py
+│   │   ├── result_exporter.py
+│   │   ├── scan_history.py
+│   │   └── docker_manager.py
+│   └── web/
+│       ├── app.py
+│       ├── scan_manager.py
+│       ├── templates/          ← dashboard / scan / results / memory / benchmark ...
+│       └── static/css/
+│
+└── data/
+    ├── databases/              ← CodeQL DB + cache_index.json
+    ├── workspaces/
+    ├── queries/                ← 各语言 qlpack + 生成 .ql
+    ├── results/                ← SARIF / 导出 JSON·HTML
+    └── rule_memory/            ← 规则归档与向量索引
+```
+
+---
+
+## 5. 技术栈
+
+| 层次 | 技术 |
+|---|---|
+| 核心语言 | Python 3.10+ |
+| LLM 编排 | LangChain（`langchain`, `langchain-openai`, `langchain-core`） |
+| 大语言模型 | 任意 OpenAI 兼容接口（Gemini / GPT-4o / Claude 等） |
+| 静态分析引擎 | CodeQL CLI v2.15+（已测试 v2.23.7） |
+| CodeQL 标准库 | `codeql/java-all@9.0.2` |
+| 数据交换格式 | SARIF（CodeQL 标准输出）、JSON |
+| Git 操作 | GitPython 3.1+ |
+| 数据模型 | Pydantic v2（部分配置使用 dataclass） |
+| Web | Flask |
+
+---
+
+## 6. 快速开始
+
+### 6.1 环境准备
+
+```bash
+# 1. 安装 Python 依赖
+pip install -r requirements.txt
+
+# 2. 配置 API Key
+cp .env.example .env
+# 编辑 .env，填写 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+
+# 3. 确认 CodeQL CLI 已安装
+codeql --version
+```
+
+### 6.2 运行（GitHub 模式）
+
+```powershell
+# 自动克隆 + 建库 + 生成规则 + 扫描 + 语义审查
+python -m src.main `
+  --github-url https://github.com/j3ers3/Hello-Java-Sec `
+  --language java `
+  --vuln-type "Spring EL Injection"
+
+# 跳过 Agent-R（节省 LLM 费用）
+python -m src.main `
+  --github-url https://github.com/xxx/yyy `
+  --language java `
+  --vuln-type "Spring EL Injection" `
+  --no-agent-r
+
+# 第二次扫描同一仓库（自动命中数据库缓存）
+python -m src.main `
+  --github-url https://github.com/j3ers3/Hello-Java-Sec `
+  --language java `
+  --vuln-type "OGNL Injection"
+```
+
+### 6.3 运行（本地目录模式）
+
+```powershell
+python -m src.main `
+  --source-dir C:\path\to\project `
+  --language java `
+  --vuln-type "Spring EL Injection"
+```
+
+### 6.3.1 Agent-P 自主模式
+
+```powershell
+python -m src.main --source-dir C:\path\to\project --auto
+```
+
+### 6.3.2 Web 控制台
+
+```powershell
+python -m src.web.app
+# 浏览器打开 http://127.0.0.1:5000
+```
+
+### 6.4 全部 CLI 参数（节选）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--check` | — | 环境健康检查后退出 |
+| `--list-templates` | — | 列出内置 QL 模板 |
+| `--config` | — | YAML 配置（CLI 优先） |
+| `--github-url` / `--source-dir` | — | 输入源（扫描时二选一；`--auto` 可配合其一） |
+| `--language` | — | 目标语言（`--auto` 时可省略，由侦察推断） |
+| `--vuln-type` / `--vuln-types` | — | 单类型或多类型并行（与 `--auto` 互斥于「是否手写类型」） |
+| `--auto` | 关闭 | Agent-P 自主模式 |
+| `--sink-hints` | — | 自定义 Sink 提示 |
+| `--codeql-path` | `codeql` | CodeQL 路径 |
+| `--codeql-db` | — | 使用已有数据库，跳过建库 |
+| `--no-build` | 关闭 | `build-mode=none` 建库 |
+| `--max-retries` | `3` | Agent-Q 编译自修复上限 |
+| `--parallel-workers` | `3` | `run_parallel` 线程池规模 |
+| `--no-agent-r` / `--no-agent-s` / `--no-agent-e` | 关闭 | 关闭对应 Agent |
+| `--agent-e-host` | — | Remote 验证目标 URL |
+| `--min-confidence` | `0.6` | Agent-R 过滤阈值 |
+| `--agent-r-workers` / `--agent-r-batch` | `1` / `1` | Agent-R 并发与批量 |
+| `--no-code-browser` | 关闭 | Agent-R 降级为简单行窗口 |
+| `--external-sarif` | — | 外部 SARIF，跳过 Q+CodeQL |
+| `--sca` | 关闭 | 供应链分析 |
+| `--firmware` / `--ghidra-home` | — | 固件/二进制路径与 Ghidra |
+| `--patch-commit` | — | Patch-Aware：切到补丁前版本 |
+| `--no-rule-memory` | 关闭 | 禁用规则记忆库 |
+| `--rule-memory-dir` | `data/rule_memory` | 记忆库目录 |
+| `--show-memory` / `--search-memory` / `--clear-memory` | — | 记忆库管理 |
+| `--export-memory` / `--import-memory` | — | ZIP Bundle 导出/导入 |
+| `--output-json` / `--output-html` | — | 结果导出 |
+| `--no-cleanup` | 关闭 | 保留克隆目录 |
+| `--workspace-dir` / `--db-dir` / `--results-dir` / `--queries-dir` | 见代码 | 数据目录 |
+| `--verbose` | 关闭 | DEBUG 日志 |
+
+完整列表以 `python -m src.main -h` 为准。
+
+---
+
+## 7. 实测结果
+
+**目标仓库**：[j3ers3/Hello-Java-Sec](https://github.com/j3ers3/Hello-Java-Sec)（Java 漏洞靶场）
+
+| 阶段 | 耗时 | 结果 |
+|---|---|---|
+| Phase 0：克隆仓库 | ~4 秒 | 探测到 pom.xml → Maven 构建 |
+| Phase 1：创建 CodeQL 数据库 | ~2 分钟 | 成功，第二次命中缓存跳过 |
+| Phase 2：Agent-Q 生成规则 | ~8 秒（模板命中） | 首次编译通过 |
+| Phase 3：CodeQL 扫描 | ~28 秒 | 发现 **3 处** SpEL 注入 |
+| Phase 4：Agent-R 审查 | ~25 秒 | 3 条发现语义研判完成 |
+
+**发现的漏洞位置**：
+
+```
+SpEL.java:42   ← 第 1 处 Spring EL 注入
+SpEL.java:63   ← 第 2 处 Spring EL 注入
+SpEL.java:75   ← 第 3 处 Spring EL 注入
+```
+
+---
+
+## 8. 开发路线图
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| Phase 1 | CodeQL CLI 封装、基础设施 | ✅ |
+| Phase 2 | Agent-Q + 模板库 + 自修复 | ✅ |
+| Phase 3 | 克隆、构建探测、DB 缓存、预建库 | ✅ |
+| Phase 4 | Agent-R + CodeBrowser + 批量/并发 | ✅ |
+| Phase 5 | Agent-S PoC 生成 | ✅ |
+| Phase 6 | Agent-E 动态验证 + 迭代精化 | ✅ |
+| Phase 6+ | RuleMemory（多级向量后端 + Bundle） | ✅ |
+| Phase 7 | 多漏洞并行（`--vuln-types` / Agent-P） | ✅ |
+| — | Web Dashboard、导出 HTML/JSON、扫描历史 | ✅ |
+| 后续 | 更多语言模板、Solidity 一等 CLI、评测自动化深化 | ⏳ 持续迭代 |

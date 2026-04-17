@@ -112,6 +112,27 @@
       "import_source": "local_scan",
       "verified_at": "",
       "verified_by": ""
+    },
+    {
+      "rule_id": "java_20260417141317",
+      "language": "java",
+      "vuln_type": "Information Exposure (CWE-200)",
+      "query_path": "data\\rule_memory\\rules\\java_20260417141317_java_Information_Exposure_(CWE-200)_54aea4cb.ql",
+      "created_at": "2026-04-17T14:13:17.644985+00:00",
+      "tags": [],
+      "sink_method": "",
+      "data_flow_summary": "",
+      "sarif_message": "可能的信息泄露（CWE-200）：调用了潜在危险的输出/堆栈打印方法 'java.lang.Throwable.printStackTrace'，可能将敏感信息暴露给未授权方。",
+      "code_snippet": " 109 |             String result8=HttpUtil.post(\"http://localhost:8080/api/data/recvData\",paramMap8);\n 110 |             System.out.println(\"result8 = \" + result8);\n 111 | \n 112 | \n 113 |         } catch (Exception e) {\n 114 |             e.printStackTrace();\n 115 |         }\n 116 |     }\n 117 | \n 118 | }",
+      "cwe": "CWE-200",
+      "detected_frameworks": [],
+      "source_repo": "local://C:\\Users\\23504\\Desktop\\reV\\data\\workspaces\\20260417_220314_8d7b1f\\repo",
+      "source_commit": "",
+      "ql_hash": "6d14ee31411b7450c6a36422be1112110436382b8dd92882ff1e647fff265d63",
+      "trust_level": "verified",
+      "import_source": "local_scan",
+      "verified_at": "",
+      "verified_by": ""
     }
   ]
 }

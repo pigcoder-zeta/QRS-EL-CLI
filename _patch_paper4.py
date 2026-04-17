@@ -1,0 +1,70 @@
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+with open(r'c:\Users\23504\Desktop\reV\paper2.md', 'rb') as f:
+    raw = f.read()
+text = raw.decode('utf-8')
+changes = 0
+
+# ---- B: Agent-R output spec (without bold prefix) ----
+old_B = (
+    "\u8f93\u51fa\u89c4\u8303**\uff1a\u6bcf\u6761\u5ba1\u67e5\u7ed3\u8bba\u5305\u542b"
+    "\u72b6\u6001\u6807\u7b7e\uff08`vulnerable / safe / uncertain`\uff09\u3001"
+    "\u91cf\u5316\u7f6e\u4fe1\u5ea6\u8bc4\u5206\u3001\u68c0\u6d4b\u5f15\u64ce"
+    "\u6807\u8bc6\u3001\u63a8\u7406\u8bf4\u660e\u548c Sink \u65b9\u6cd5\u7b7e"
+    "\u540d\uff0c\u5f62\u6210\u6807\u51c6\u5316\u7814\u5224\u8bb0\u5f55\u3002"
+)
+new_B = old_B + (
+    "\n\n**\u589e\u5f3a\u7684 SARIF \u89e3\u6790\u80fd\u529b**\uff1a"
+    "Agent-R \u5bf9 SARIF \u7684\u89e3\u6790\u5df2\u5347\u7ea7\u4e3a\u591a\u4f4d\u7f6e\u611f\u77e5\u6a21\u5f0f"
+    "\u2014\u2014\u6bcf\u6761\u544a\u8b66\u9664\u4e3b\u53d1\u73b0\u4f4d\u7f6e\u5916"
+    "\uff0c\u8fd8\u63d0\u53d6\u6240\u6709 `locations` \u8865\u5145\u4f4d\u7f6e\u548c"
+    " `relatedLocations` \u5173\u8054\u4f4d\u7f6e\uff0c\u5408\u5e76\u4e3a\u7ed3\u6784\u5316"
+    " `additional_locations` \u5b57\u6bb5\uff1b"
+    "\u6279\u91cf\u5ba1\u67e5\u7684 LLM \u54cd\u5e94\u901a\u8fc7 id \u5bf9\u9f50\u9a8c\u8bc1"
+    "\u786e\u4fdd\u7ed3\u679c\u4e0e\u9884\u671f\u544a\u8b66\u4e00\u4e00\u5bf9\u5e94\uff0c"
+    "\u7f3a\u5931\u6761\u76ee\u81ea\u52a8\u6807\u8bb0\u4e3a `UNCERTAIN`\uff1b"
+    "Sink \u65b9\u6cd5\u540d\u4ece SARIF \u6d88\u606f\u4e2d\u7cbe\u786e\u63d0\u53d6"
+    "\uff08\u5339\u914d\u53cd\u5f15\u53f7\u5305\u88f9\u7684\u7b26\u53f7\u540d\uff09\uff0c"
+    "\u66ff\u4ee3\u539f\u6709\u7684\u6d88\u606f\u622a\u65ad\u65b9\u5f0f\uff0c"
+    "\u4f7f CodeBrowser \u7b26\u53f7\u67e5\u8be2\u66f4\u52a0\u51c6\u786e\u3002"
+)
+if old_B in text:
+    text = text.replace(old_B, new_B, 1)
+    print("OK B: Agent-R SARIF multi-location")
+    changes += 1
+else:
+    print("MISS B")
+
+# ---- E: Agent-E full HTTP + image cache ----
+old_E = (
+    "Agent-E \u81ea\u52a8\u89e3\u6790\u76ee\u6807\u9879\u76ee\u4e2d\u7684"
+    " `Dockerfile` / `docker-compose.yml`\uff0c\u52a8\u6001\u6784\u5efa\u955c\u50cf"
+    "\u5e76\u62c9\u8d77\u9694\u79bb\u6c99\u7b71\u3002\u9a8c\u8bc1\u5224\u5b9a\u91c7\u7528"
+    "**\u53cc\u5c42\u5206\u6790\u673a\u5236**\uff1a"
+)
+new_E = (
+    "Agent-E \u81ea\u52a8\u89e3\u6790\u76ee\u6807\u9879\u76ee\u4e2d\u7684"
+    " `Dockerfile` / `docker-compose.yml`\uff0c\u52a8\u6001\u6784\u5efa\u955c\u50cf"
+    "\u5e76\u62c9\u8d77\u9694\u79bb\u6c99\u7b71\u3002"
+    "\u65b0\u589e Docker \u955c\u50cf\u590d\u7528\u7f13\u5b58\uff08`_image_cache`\uff09"
+    "\u2014\u2014\u76f8\u540c\u4ed3\u5e93\u8def\u5f84\u7684\u540e\u7eed\u9a8c\u8bc1"
+    "\u76f4\u63a5\u590d\u7528\u5df2\u6784\u5efa\u955c\u50cf\uff0c\u907f\u514d\u91cd\u590d"
+    " `docker build` \u5f00\u9500\uff0c\u5728 PoC \u8fed\u4ee3\u573a\u666f\u4e0b\u6548\u679c"
+    "\u663e\u8457\u3002HTTP \u8bf7\u6c42\u6784\u9020\u80fd\u529b\u5df2\u5168\u9762\u6269\u5c55"
+    "\uff1a\u652f\u6301 JSON Body\uff08`application/json`\uff09\u3001\u81ea\u5b9a\u4e49"
+    " Header \u4e0e Cookie \u7684\u5b8c\u6574\u6784\u9020\uff0c\u8986\u76d6\u73b0\u4ee3"
+    " API \u7684\u771f\u5b9e\u8c03\u7528\u573a\u666f\u3002"
+    "\u9a8c\u8bc1\u5224\u5b9a\u91c7\u7528**\u53cc\u5c42\u5206\u6790\u673a\u5236**\uff1a"
+)
+if old_E in text:
+    text = text.replace(old_E, new_E, 1)
+    print("OK E: Agent-E Docker cache + full HTTP")
+    changes += 1
+else:
+    print("MISS E")
+
+print(f"\nTotal: {changes} changes")
+with open(r'c:\Users\23504\Desktop\reV\paper2.md', 'wb') as f:
+    f.write(text.encode('utf-8'))
+print("File saved.")
