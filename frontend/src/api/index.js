@@ -26,6 +26,10 @@ export function connectSSE(url, handlers) {
   for (const [event, fn] of Object.entries(handlers)) {
     es.addEventListener(event, (e) => {
       try { fn(JSON.parse(e.data)) } catch { fn(e.data) }
+      // 服务端主动结束流时，标记为正常关闭，避免触发 onerror 误报
+      if (event === 'complete' || event === 'error') {
+        manuallyClosed = true
+      }
     })
   }
   es.onerror = () => {

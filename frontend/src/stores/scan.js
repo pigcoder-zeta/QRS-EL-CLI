@@ -28,10 +28,12 @@ export function clearActiveTask() {
 export function completeTask(resultFile) {
   scanStore.status = 'completed'
   scanStore.resultFile = resultFile || null
+  scanStore.activeTaskId = null
   localStorage.removeItem(STORAGE_KEY)
 }
 
 export function failTask() {
   scanStore.status = 'error'
+  scanStore.activeTaskId = null
   localStorage.removeItem(STORAGE_KEY)
 }

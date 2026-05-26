@@ -81,15 +81,21 @@ const highlightLog = (msg) => {
 }
 
 onMounted(async () => {
+  const isCompleted = (s) => s === 'completed' || s === 'completed_with_warnings' || s === 'completed_with_errors'
+
+  const applyCompleted = (status, resultFile_) => {
+    taskStatus.value = status
+    resultFile.value = resultFile_ || ''
+    phases.value.forEach(p => p.status = 'done')
+    completeTask(resultFile_)
+    addLog({ level: 'info', message: 'Task already completed.', html: '<span class="text-green-400 font-bold">✓ Task already completed</span>' })
+    setTimeout(() => { missionComplete.value = true }, 300)
+  }
+
   try {
     const status = await fetchScanStatus(props.id)
-    if (status?.status === 'completed' || status?.status === 'completed_with_warnings' || status?.status === 'completed_with_errors') {
-      taskStatus.value = status.status
-      resultFile.value = status.result_file || ''
-      phases.value.forEach(p => p.status = 'done')
-      completeTask(status.result_file)
-      addLog({ level: 'info', message: 'Task already completed.', html: '<span class="text-green-400 font-bold">✓ Task already completed</span>' })
-      setTimeout(() => { missionComplete.value = true }, 300)
+    if (isCompleted(status?.status)) {
+      applyCompleted(status.status, status.result_file)
       return
     }
     if (status?.status === 'error') {
@@ -98,7 +104,17 @@ onMounted(async () => {
       addLog({ level: 'error', message: status.error || 'Task failed', html: `<span class="text-red-400 font-bold">ERROR: ${status.error || 'Task failed'}</span>` })
       return
     }
-  } catch {}
+  } catch {
+    // 后端重启后内存任务丢失，尝试从结果文件列表中匹配 task_id
+    try {
+      const results = await import('../api').then(m => m.fetchResults())
+      const matched = (results || []).find(r => r.filename && r.filename.includes(props.id))
+      if (matched) {
+        applyCompleted('completed', matched.filename)
+        return
+      }
+    } catch {}
+  }
 
   es = streamScan(props.id, {
     log: (data) => {

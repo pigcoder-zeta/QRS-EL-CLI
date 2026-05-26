@@ -18,7 +18,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +26,24 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class _QueueLogHandler(logging.Handler):
-    """将日志消息转发到 SSE 事件队列。"""
+    """将 logging 实时转发为 SSE `log` 事件。
 
-    def __init__(self, q: queue.Queue):
+    扫描任务：写入 ScanTask.event_queue **并** broadcast 到 subscribe() 侧队列（与 _push 一致）。
+    消融实验：仅写入传入的裸队列（该 SSE 直接从该队列读）。
+    """
+
+    def __init__(self, target: Union["ScanTask", queue.Queue]):
         super().__init__(level=logging.INFO)
-        self._q = q
+        if isinstance(target, ScanTask):
+            self._task = target
+            self._raw_q = None
+        else:
+            self._task = None
+            self._raw_q = target
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._q.put({
+            evt = {
                 "event": "log",
                 "data": {
                     "level": record.levelname.lower(),
@@ -42,7 +51,12 @@ class _QueueLogHandler(logging.Handler):
                     "timestamp": datetime.now().isoformat(),
                     "logger": record.name,
                 },
-            })
+            }
+            if self._task is not None:
+                self._task.event_queue.put(evt)
+                self._task.broadcast(evt)
+            elif self._raw_q is not None:
+                self._raw_q.put(evt)
         except Exception:
             pass
 
@@ -54,18 +68,73 @@ class ScanTask:
         self.task_id = task_id
         self.config = config
         self.event_queue: queue.Queue = queue.Queue()
+        self._subscribers: list[queue.Queue] = []
+        self._sub_lock = threading.Lock()
         self.status = "pending"
         self.result_file: Optional[str] = None
         self.error: Optional[str] = None
         self.started_at = datetime.now().isoformat()
+        self.finished = False
+
+    def subscribe(self) -> queue.Queue:
+        """为新的 SSE 连接创建独立的事件队列。"""
+        q: queue.Queue = queue.Queue()
+        with self._sub_lock:
+            if self.finished:
+                q.put(None)
+            else:
+                self._subscribers.append(q)
+        return q
+
+    def broadcast(self, evt: dict):
+        """向所有订阅者广播事件。"""
+        with self._sub_lock:
+            for q in self._subscribers:
+                q.put(evt)
+
+    def finish(self):
+        """标记任务结束，向所有订阅者发送终止信号。"""
+        with self._sub_lock:
+            self.finished = True
+            for q in self._subscribers:
+                q.put(None)
+            self._subscribers.clear()
 
 
 class ScanManager:
     """管理多个扫描任务的生命周期。"""
 
+    _STATE_DIR = _PROJECT_ROOT / "data" / "results" / "task_states"
+
     def __init__(self):
         self._tasks: dict[str, ScanTask] = {}
         self._lock = threading.Lock()
+        self._STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _persist_task(self, task: ScanTask):
+        """将已完成任务的状态写入磁盘，供重启后恢复。"""
+        try:
+            state = {
+                "task_id": task.task_id,
+                "status": task.status,
+                "result_file": task.result_file,
+                "error": task.error,
+                "started_at": task.started_at,
+            }
+            path = self._STATE_DIR / f"{task.task_id}.json"
+            path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_persisted_task(self, task_id: str) -> Optional[dict]:
+        """从磁盘加载已持久化的任务状态。"""
+        try:
+            path = self._STATE_DIR / f"{task_id}.json"
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return None
 
     def start_scan(self, config: dict) -> str:
         task_id = uuid.uuid4().hex[:12]
@@ -82,30 +151,32 @@ class ScanManager:
 
     def get_status(self, task_id: str) -> Optional[dict]:
         task = self._tasks.get(task_id)
-        if not task:
-            return None
-        return {
-            "task_id": task.task_id,
-            "status": task.status,
-            "result_file": task.result_file,
-            "error": task.error,
-            "started_at": task.started_at,
-        }
+        if task:
+            return {
+                "task_id": task.task_id,
+                "status": task.status,
+                "result_file": task.result_file,
+                "error": task.error,
+                "started_at": task.started_at,
+            }
+        # 内存中不存在（后端重启），尝试从磁盘恢复
+        return self._load_persisted_task(task_id)
 
-    # 后端 completed_phases 值 → 前端 phase key 的映射
-    _PHASE_MAP = {
-        "clone_repo":      "clone",
-        "triage":          "clone",       # 分诊归入"克隆+分诊"
-        "create_database": "database",
-        "generate_query":  "synthesis",
-        "analyze":         "scan",
-        "review":          "scan",        # 审查归入"扫描+审查"
-        "generate_poc":    "verify",
-        "verify":          "verify",
+    # 若干后端子阶段对应一个前端「大阶段」：全部完成后只推一次 phase_complete，避免重复一行
+    _PHASE_GROUP_TO_FE: dict[str, frozenset[str]] = {
+        "database": frozenset({"create_database"}),
+        "synthesis": frozenset({"generate_query"}),
+        "scan": frozenset({"analyze", "review"}),
+        "verify": frozenset({"generate_poc", "verify"}),
     }
+    _POST_CLONE_MARKERS = frozenset({
+        "create_database", "generate_query", "analyze", "review", "generate_poc", "verify",
+    })
 
     def _push(self, task: ScanTask, event: str, data: dict):
-        task.event_queue.put({"event": event, "data": data})
+        evt = {"event": event, "data": data}
+        task.event_queue.put(evt)
+        task.broadcast(evt)
 
     def _run_with_phase_tracking(self, coord, task: ScanTask):
         """在子线程中运行 Coordinator，主线程轮询 completed_phases 推送 SSE。"""
@@ -121,20 +192,40 @@ class ScanManager:
         t = threading.Thread(target=_target, daemon=True)
         t.start()
 
-        seen_phases: set[str] = set()
+        seen_fe: set[str] = set()
 
         def _flush_phases():
             state = coord.active_state
             if state is None:
                 return
-            for phase_key in list(state.completed_phases):
-                if phase_key not in seen_phases:
-                    seen_phases.add(phase_key)
-                    fe_key = self._PHASE_MAP.get(phase_key, phase_key)
+            done = set(state.completed_phases)
+
+            # clone+分诊：分诊可选（未启用 Agent-T 时不会写入 triage），见 coordinator._phase_triage
+            if "clone" not in seen_fe and "clone_repo" in done:
+                triage_ok = "triage" in done
+                skipped_triage = bool(done & self._POST_CLONE_MARKERS)
+                if triage_ok or skipped_triage:
+                    seen_fe.add("clone")
+                    last_backend = "triage" if triage_ok else "clone_repo"
                     self._push(task, "phase_complete", {
-                        "phase": fe_key,
-                        "backend_phase": phase_key,
+                        "phase": "clone",
+                        "backend_phase": last_backend,
                     })
+
+            for fe_key, need in self._PHASE_GROUP_TO_FE.items():
+                if fe_key in seen_fe:
+                    continue
+                if not need.issubset(done):
+                    continue
+                seen_fe.add(fe_key)
+                last_backend = None
+                for ph in state.completed_phases:
+                    if ph in need:
+                        last_backend = ph
+                self._push(task, "phase_complete", {
+                    "phase": fe_key,
+                    "backend_phase": last_backend or fe_key,
+                })
 
         while t.is_alive():
             t.join(timeout=0.3)
@@ -148,7 +239,7 @@ class ScanManager:
         return holder[0] if holder else None
 
     def _run_scan(self, task: ScanTask):
-        handler = _QueueLogHandler(task.event_queue)
+        handler = _QueueLogHandler(task)
         handler.setFormatter(logging.Formatter("%(message)s"))
         root_logger = logging.getLogger()
         root_logger.addHandler(handler)
@@ -258,6 +349,12 @@ class ScanManager:
             report_path = str(results_dir / report_name)
             export_json(states, report_path, language=language)
 
+            # 主动清除结果列表缓存，确保前端立即能拿到最新数据
+            import src.web.app as _web_app
+            with _web_app._results_cache_lock:
+                _web_app._cached_results_cache_key = None
+                _web_app._cached_results_payload = None
+
             task.result_file = report_name
             has_errors = any(s.error for s in states)
             has_warnings = bool(all_warnings)
@@ -281,9 +378,9 @@ class ScanManager:
             logger.exception("Scan task %s failed", task.task_id)
         finally:
             root_logger.removeHandler(handler)
+            self._persist_task(task)
             task.event_queue.put(None)
-
-
+            task.finish()
 # ---------------------------------------------------------------------------
 # 消融实验套件
 # ---------------------------------------------------------------------------

@@ -90,10 +90,8 @@ onUnmounted(() => {
     <!-- Topbar -->
     <header class="h-12 border-b border-white/5 flex items-center justify-between px-5 z-30 bg-[#020617]/90 backdrop-blur-md shrink-0">
       <div class="flex items-center gap-3 cursor-pointer group" @click="router.push('/')">
-        <div class="w-8 h-8 rounded-lg bg-argus-purple/20 flex items-center justify-center border border-argus-purple/50 group-hover:bg-argus-purple/30 group-hover:shadow-[0_0_12px_rgba(139,92,246,0.4)] transition-all duration-300">
-          <ShieldAlert class="w-4.5 h-4.5 text-argus-purple group-hover:text-white transition-colors" />
-        </div>
-        <h1 class="argus-logo text-xl font-black tracking-[0.25em] font-mono select-none">
+        <img src="/argus-logo.png" alt="Argus" class="w-11 h-11 object-contain group-hover:drop-shadow-[0_0_14px_rgba(56,189,248,0.95)] transition-all duration-300" />
+        <h1 class="argus-logo text-[1.8rem] font-black tracking-[0.34em] font-mono select-none">
           <span class="argus-letter" style="--i:0">A</span><span class="argus-letter" style="--i:1">R</span><span class="argus-letter" style="--i:2">G</span><span class="argus-letter" style="--i:3">U</span><span class="argus-letter" style="--i:4">S</span>
         </h1>
       </div>
@@ -187,21 +185,20 @@ onUnmounted(() => {
 .argus-logo {
   position: relative;
   line-height: 1;
+  filter: drop-shadow(0 0 14px rgba(139, 92, 246, 0.3));
 }
 .argus-letter {
   display: inline-block;
-  background: linear-gradient(135deg, #c084fc 0%, #a855f7 30%, #38bdf8 70%, #818cf8 100%);
-  background-size: 200% 200%;
+  background: linear-gradient(135deg, #d8b4fe 0%, #a855f7 35%, #38bdf8 70%, #818cf8 100%);
+  background-size: 220% 220%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: argusShimmer 4s ease-in-out infinite;
+  text-shadow: 0 0 18px rgba(167, 139, 250, 0.35);
+  animation: argusShimmer 3.6s ease-in-out infinite;
   animation-delay: calc(var(--i) * 0.15s);
-  text-shadow: none;
-  filter: drop-shadow(0 0 6px rgba(139, 92, 246, 0.4));
 }
 .group:hover .argus-letter {
-  filter: drop-shadow(0 0 12px rgba(139, 92, 246, 0.7));
   animation-duration: 2s;
 }
 @keyframes argusShimmer {

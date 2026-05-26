@@ -111,13 +111,23 @@ from collections import defaultdict as _defaultdict
 _rate_limit_lock = _rl_threading.Lock()
 _rate_limit_store: dict[str, list[float]] = _defaultdict(list)
 _RATE_LIMIT_WINDOW = 60     # 窗口期（秒）
-_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("ARGUS_RATE_LIMIT", "30"))
+_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("ARGUS_RATE_LIMIT", "120"))
+
+# 不参与限流的端点前缀（SSE 长连接 + 高频健康探针）
+_RATE_LIMIT_EXEMPT_PREFIXES = (
+    "/api/scan/stream/",
+    "/api/scan/ablation/stream/",
+    "/api/system/health",
+)
 
 
 @app.before_request
 def _check_rate_limit():
     """对 API 端点实施简易滑动窗口速率限制。"""
     if not request.path.startswith("/api/"):
+        return None
+    # SSE 长连接和健康探针豁免限流
+    if any(request.path.startswith(p) for p in _RATE_LIMIT_EXEMPT_PREFIXES):
         return None
     client_ip = request.remote_addr or "unknown"
     now = _time.time()
@@ -163,10 +173,14 @@ def api_scan_start():
 @app.route("/api/scan/stream/<task_id>")
 def api_scan_stream(task_id: str):
     def _generate():
-        q = scan_manager.get_event_queue(task_id)
-        if q is None:
+        task = scan_manager._tasks.get(task_id)
+        if task is None:
             yield f"event: error\ndata: {json.dumps({'message': 'task not found'})}\n\n"
             return
+        if task.finished:
+            yield f"event: complete\ndata: {json.dumps({'status': task.status, 'result_file': task.result_file or ''})}\n\n"
+            return
+        q = task.subscribe()
         while True:
             evt = q.get()
             if evt is None:
