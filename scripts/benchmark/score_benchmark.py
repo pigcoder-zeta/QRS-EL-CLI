@@ -13,7 +13,7 @@ QRSE-X 通用 Benchmark 评分工具
   - Youden Index（TPR - FPR）
 
 使用方法：
-  python scripts/score_benchmark.py \\
+  python scripts/benchmark/score_benchmark.py \\
       --sarif data/results/benchmark/results_xxx.sarif \\
       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \\
       --benchmark-type owasp
@@ -580,13 +580,13 @@ def main() -> None:
         epilog="""
 示例：
   # OWASP Benchmark
-  python scripts/score_benchmark.py \\
+  python scripts/benchmark/score_benchmark.py \\
       --sarif data/results/benchmark/results_sqli.sarif \\
       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \\
       --benchmark-type owasp
 
   # Juliet Test Suite
-  python scripts/score_benchmark.py \\
+  python scripts/benchmark/score_benchmark.py \\
       --sarif-dir data/results/juliet \\
       --expected data/benchmark/Juliet/manifest.csv \\
       --benchmark-type juliet

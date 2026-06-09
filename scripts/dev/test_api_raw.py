@@ -1,11 +1,19 @@
-import os, httpx, json, sys
+import json
+import os
+import sys
+from pathlib import Path
+
+import httpx
 
 # 强制 utf-8 输出
 sys.stdout.reconfigure(encoding="utf-8")
 
+ROOT = Path(__file__).resolve().parents[2]
+os.chdir(ROOT)
+
 env = {}
 try:
-    for line in open(".env", encoding="utf-8").readlines():
+    for line in open(ROOT / ".env", encoding="utf-8").readlines():
         line = line.strip()
         if "=" in line and not line.startswith("#"):
             k, v = line.split("=", 1)

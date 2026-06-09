@@ -190,6 +190,65 @@ class TestAgentQSelfHeal:
         # 修复时调用了一次 LLM
         assert agent._invoke_llm.call_count >= 2  # 初始生成 + 至少一次修复
 
+    def test_python_import_error_gets_deterministic_prefix(self, tmp_path):
+        mock_runner = MagicMock(spec=CodeQLRunner)
+        mock_runner.compile_query.side_effect = [
+            (False, "ERROR: could not resolve module semmle.code.python.dataflow.new.DataFlow"),
+            (True, ""),
+        ]
+        mock_runner.install_query_pack.return_value = True
+
+        bad_python_ql = """\
+import python
+import semmle.code.python.dataflow.new.DataFlow
+select 1
+"""
+        agent = AgentQ(
+            llm=MagicMock(), runner=mock_runner,
+            output_dir=str(tmp_path / "queries"), max_retries=3,
+        )
+        agent._invoke_llm = MagicMock(return_value=bad_python_ql)
+
+        result = agent.generate_and_compile("python", "Unknown Python vuln")
+        content = result.read_text(encoding="utf-8")
+
+        assert "semmle.python.dataflow.new.DataFlow" in content
+        assert "semmle.code.python" not in content
+        assert mock_runner.compile_query.call_count == 2
+        assert agent._invoke_llm.call_count == 1
+
+    def test_llm_fix_prompt_includes_local_codeql_evidence(self, tmp_path):
+        mock_runner = MagicMock(spec=CodeQLRunner)
+        mock_runner.compile_query.side_effect = [
+            (False, "ERROR: could not resolve module semmle.code.python.dataflow.new.DataFlow"),
+            (False, "ERROR: could not resolve type RemoteFlowSource"),
+            (True, ""),
+        ]
+        mock_runner.install_query_pack.return_value = True
+
+        bad_python_ql = """\
+import python
+import semmle.code.python.dataflow.new.DataFlow
+select 1
+"""
+        fixed_python_ql = """\
+import python
+import semmle.python.dataflow.new.DataFlow
+select 1
+"""
+        agent = AgentQ(
+            llm=MagicMock(), runner=mock_runner,
+            output_dir=str(tmp_path / "queries"), max_retries=3,
+        )
+        agent._invoke_llm = MagicMock(side_effect=[bad_python_ql, fixed_python_ql])
+
+        agent.generate_and_compile("python", "Unknown Python vuln")
+
+        fix_prompt = agent._invoke_llm.call_args_list[1].args[1]
+        assert "本地 CodeQL 标准库证据" in fix_prompt
+        assert "semmle.python.dataflow.new.RemoteFlowSources" in fix_prompt
+        assert "不使用 semmle.code.python" in fix_prompt
+
     def test_max_retries_raises(self, tmp_path):
         """所有重试均失败时抛出 RuntimeError。"""
         mock_runner = MagicMock(spec=CodeQLRunner)

@@ -65,6 +65,7 @@ onMounted(async () => {
           sink_method: f.sink_method || '',
           engine: f.engine || 'codeql',
           poc_result: f.poc_result || f.poc || null,
+          verification_result: f.verification || null,
           vuln_type: run.vuln_type || '',
         })
       })
@@ -196,15 +197,15 @@ const selectFinding = (idx) => {
           <!-- Level 3: Runtime Verification -->
           <div class="relative">
             <div class="absolute -left-5 top-1 w-3 h-3 rounded-full border-2"
-                 :class="selected.poc_result ? 'bg-green-500/30 border-green-500' : 'bg-gray-700/30 border-gray-600'"></div>
+                 :class="selected.poc_result || selected.verification_result ? 'bg-green-500/30 border-green-500' : 'bg-gray-700/30 border-gray-600'"></div>
             <div class="glass-panel p-4">
               <div class="flex items-center gap-2 mb-3 text-xs font-mono">
-                <ShieldCheck class="w-4 h-4" :class="selected.poc_result ? 'text-green-400' : 'text-gray-600'" />
-                <span class="font-bold tracking-wider" :class="selected.poc_result ? 'text-green-400' : 'text-gray-600'">LEVEL 3 — RUNTIME VERIFICATION</span>
+                <ShieldCheck class="w-4 h-4" :class="selected.poc_result || selected.verification_result ? 'text-green-400' : 'text-gray-600'" />
+                <span class="font-bold tracking-wider" :class="selected.poc_result || selected.verification_result ? 'text-green-400' : 'text-gray-600'">LEVEL 3 — RUNTIME VERIFICATION</span>
               </div>
-              <div v-if="selected.poc_result" class="text-[12px] font-mono text-gray-300 space-y-3">
-                <div class="mb-1">Status: <span class="text-green-400 font-bold">CONFIRMED</span></div>
-                <template v-if="typeof selected.poc_result === 'object' && selected.poc_result.http_trigger">
+              <div v-if="selected.poc_result || selected.verification_result" class="text-[12px] font-mono text-gray-300 space-y-3">
+                <!-- PoC payload / trigger -->
+                <template v-if="selected.poc_result && typeof selected.poc_result === 'object' && selected.poc_result.http_trigger">
                   <div>
                     <span class="text-gray-500 text-[10px]">HTTP TRIGGER</span>
                     <pre class="bg-black/40 rounded-lg p-3 mt-1 border border-white/5 text-[11px] overflow-x-auto whitespace-pre-wrap text-green-300">{{ selected.poc_result.http_trigger.example || `${selected.poc_result.http_trigger.method} ${selected.poc_result.http_trigger.path}` }}</pre>
@@ -220,7 +221,59 @@ const selectFinding = (idx) => {
                     <p class="mt-1 text-[11px] text-gray-400 leading-relaxed">{{ selected.poc_result.expected_output }}</p>
                   </div>
                 </template>
-                <pre v-else class="bg-black/40 rounded-lg p-3 border border-white/5 text-[11px] overflow-x-auto whitespace-pre-wrap">{{ typeof selected.poc_result === 'string' ? selected.poc_result : JSON.stringify(selected.poc_result, null, 2) }}</pre>
+
+                <!-- PoC fallback -->
+                <template v-else-if="selected.poc_result">
+                  <pre class="bg-black/40 rounded-lg p-3 border border-white/5 text-[11px] overflow-x-auto whitespace-pre-wrap">{{ typeof selected.poc_result === 'string' ? selected.poc_result : JSON.stringify(selected.poc_result, null, 2) }}</pre>
+                </template>
+
+                <!-- Divider between PoC and Verification -->
+                <div v-if="selected.poc_result && selected.verification_result" class="border-t border-white/10 my-2"></div>
+
+                <!-- Verification Result -->
+                <template v-if="selected.verification_result && typeof selected.verification_result === 'object'">
+                  <div class="mb-1 flex items-center gap-2">
+                    <span>Status:</span>
+                    <span :class="selected.verification_result.status === 'CONFIRMED' ? 'text-green-400 font-bold' : selected.verification_result.status === 'UNCONFIRMED' ? 'text-yellow-400 font-bold' : 'text-gray-400 font-bold'">
+                      {{ selected.verification_result.status }}
+                    </span>
+                    <span v-if="selected.verification_result.confidence" class="text-gray-600">
+                      ({{ (selected.verification_result.confidence * 100).toFixed(0) }}%)
+                    </span>
+                    <span v-if="selected.verification_result.duration_seconds" class="text-gray-600 ml-auto">
+                      {{ selected.verification_result.duration_seconds.toFixed(1) }}s
+                    </span>
+                  </div>
+
+                  <div v-if="selected.verification_result.payload_used">
+                    <span class="text-gray-500 text-[10px]">PAYLOAD USED</span>
+                    <code class="block bg-red-500/10 text-red-400 border border-red-500/20 rounded px-2 py-1 mt-1 text-[10px]">{{ selected.verification_result.payload_used }}</code>
+                  </div>
+
+                  <div v-if="selected.verification_result.request_summary">
+                    <span class="text-gray-500 text-[10px]">HTTP REQUEST</span>
+                    <pre class="bg-black/40 rounded-lg p-3 mt-1 border border-white/5 text-[11px] overflow-x-auto whitespace-pre-wrap text-cyan-300">{{ selected.verification_result.request_summary }}</pre>
+                  </div>
+
+                  <div v-if="selected.verification_result.response_snippet">
+                    <span class="text-gray-500 text-[10px]">RESPONSE ECHO</span>
+                    <pre class="bg-black/40 rounded-lg p-3 mt-1 border border-emerald-500/10 text-[11px] overflow-x-auto whitespace-pre-wrap text-emerald-300">{{ selected.verification_result.response_snippet }}</pre>
+                  </div>
+
+                  <div v-if="selected.verification_result.evidence">
+                    <span class="text-gray-500 text-[10px]">EVIDENCE</span>
+                    <p class="mt-1 text-[11px] text-green-400 leading-relaxed">{{ selected.verification_result.evidence }}</p>
+                  </div>
+
+                  <div v-if="selected.verification_result.docker_image || selected.verification_result.target_host" class="flex gap-4 text-[10px] text-gray-600">
+                    <span v-if="selected.verification_result.docker_image">Image: {{ selected.verification_result.docker_image }}</span>
+                    <span v-if="selected.verification_result.target_host">Target: {{ selected.verification_result.target_host }}</span>
+                  </div>
+
+                  <div v-if="selected.verification_result.reason" class="text-[10px] text-gray-500 italic">
+                    {{ selected.verification_result.reason }}
+                  </div>
+                </template>
               </div>
               <div v-else class="text-[11px] text-gray-600 font-mono">
                 沙箱验证未执行或无数据

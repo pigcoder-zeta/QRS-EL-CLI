@@ -682,13 +682,15 @@ def main() -> None:
     if args.config:
         _apply_yaml_config(args)
 
+    auto_requested = getattr(args, "auto", False)
+    auto_inferred = not args.vuln_type and not args.vuln_types
+    is_auto_mode = auto_requested or auto_inferred
+
     # ── 常规扫描：校验必填参数 ────────────────────────────────────────
     if not args.source_dir and not args.github_url:
         parser.error("扫描模式下必须提供 --source-dir 或 --github-url")
-    if not args.language and not getattr(args, "auto", False):
-        parser.error("必须提供 --language（或使用 --auto 自动推断）")
-    if not args.vuln_type and not args.vuln_types and not getattr(args, "auto", False):
-        parser.error("必须提供 --vuln-type 或 --vuln-types（或使用 --auto 自主模式）")
+    if not args.language and not is_auto_mode:
+        parser.error("必须提供 --language（未指定漏洞类型时会自动启用 Agent-P 自主推断）")
 
     # ── API Key ───────────────────────────────────────────────────────
     if args.openai_api_key:
@@ -711,16 +713,18 @@ def main() -> None:
         resolved_source = None
 
     # ── 延迟导入（确保 env 已就绪）───────────────────────────────────
-    from src.orchestrator.coordinator import Coordinator, PipelineConfig
+    from src.orchestrator.coordinator import Coordinator, PipelineConfig, PipelineState
     from src.utils.result_exporter import export_json
     from src.utils.html_reporter import export_html
     from src.utils.scan_history import ScanHistory
 
     is_auto_mode = getattr(args, "auto", False)
     vuln_types: list[str] = args.vuln_types or ([args.vuln_type] if args.vuln_type else ["_auto_"])
+    if auto_inferred:
+        is_auto_mode = True
 
     base_config = PipelineConfig(
-        language=args.language or "java",
+        language=args.language or "",
         vuln_type=vuln_types[0],
         source_dir=resolved_source,
         github_url=getattr(args, "github_url", None),
@@ -755,11 +759,33 @@ def main() -> None:
         # ── Agent-P 自主模式 ──────────────────────────────────────────
         console.print(Panel(
             "[bold cyan]Agent-P 自主模式[/bold cyan]\n"
-            "侦察 → 规划 → 执行 → 评估 → 自适应循环",
+            "项目画像 → LLM 反推漏洞类型 → 执行扫描 → 评估自适应循环",
             title="Argus Auto",
         ))
         try:
-            auto_result = Coordinator.run_with_planner(base_config)
+            auto_base_config = base_config
+            auto_clone_path = None
+            if auto_base_config.github_url and not auto_base_config.source_dir:
+                console.print("[cyan]未指定漏洞类型，先克隆仓库以便 Agent-P 分析项目实际情况...[/cyan]")
+                import dataclasses
+                clone_coord = Coordinator(config=auto_base_config)
+                clone_state = PipelineState(vuln_type="_auto_")
+                clone_coord._phase_clone_repo(clone_state)
+                auto_clone_path = clone_state.cloned_repo_path
+                auto_base_config = dataclasses.replace(
+                    auto_base_config,
+                    source_dir=clone_state.source_dir,
+                    github_url=None,
+                    language=auto_base_config.language,
+                    cleanup_workspace=False,
+                )
+
+            auto_result = Coordinator.run_with_planner(auto_base_config)
+            if auto_clone_path and auto_base_config.cleanup_workspace:
+                try:
+                    Coordinator(config=auto_base_config).repo_manager.cleanup(auto_clone_path)
+                except Exception:
+                    pass
             states = auto_result.get("all_states", [])
             # 输出侦察报告、Agent-T 分类和扫描计划
             recon = auto_result.get("recon_report")

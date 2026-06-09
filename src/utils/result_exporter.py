@@ -68,8 +68,8 @@ _TOOL_VERSION = "2.4.0"
 # ---------------------------------------------------------------------------
 
 
-def _serialize_finding(review_result: Any, poc_result: Any = None) -> dict:
-    """将单条 ReviewResult（+ 可选 PoCResult）转换为字典。"""
+def _serialize_finding(review_result: Any, poc_result: Any = None, verification_result: Any = None) -> dict:
+    """将单条 ReviewResult（+ 可选 PoCResult + 可选 VerificationResult）转换为字典。"""
     f = review_result.finding
     poc_dict = None
     if poc_result is not None:
@@ -78,6 +78,21 @@ def _serialize_finding(review_result: Any, poc_result: Any = None) -> dict:
             "http_trigger": poc_result.http_trigger,
             "expected_output": poc_result.expected_output,
             "severity": poc_result.severity,
+        }
+    vr_dict = None
+    if verification_result is not None:
+        vr_dict = {
+            "status": verification_result.status.value,
+            "confidence": verification_result.confidence,
+            "evidence": verification_result.evidence,
+            "payload_used": verification_result.payload_used,
+            "request_summary": verification_result.request_summary,
+            "response_code": getattr(verification_result, "response_code", None),
+            "response_snippet": verification_result.response_snippet,
+            "docker_image": verification_result.docker_image,
+            "target_host": verification_result.target_host,
+            "duration_seconds": verification_result.duration_seconds,
+            "reason": verification_result.reason,
         }
     return {
         "status": review_result.status.value,
@@ -91,17 +106,24 @@ def _serialize_finding(review_result: Any, poc_result: Any = None) -> dict:
         "message": f.message,
         "code_context": f.code_context,
         "poc": poc_dict,
+        "verification": vr_dict,
     }
 
 
 def _serialize_state(state: "PipelineState") -> dict:
     """将单个 PipelineState 转换为字典。"""
-    # 构建 file_uri → PoCResult 映射，用于关联 finding 与 poc
-    poc_map: dict[tuple, Any] = {}
+    # 构建 file_location → PoCResult 映射，用于关联 finding 与 poc
+    poc_map: dict[str, Any] = {}
     for poc in state.poc_results:
-        # poc.file_location 格式为 "file_uri:line"
         key = poc.file_location
         poc_map[key] = poc
+
+    # 构建 file_location → VerificationResult 映射
+    # (每个 PoCResult 在 Phase 6 后携带 .verification_result)
+    vr_map: dict[str, Any] = {}
+    for poc in state.poc_results:
+        if poc.verification_result is not None:
+            vr_map[poc.file_location] = poc.verification_result
 
     findings = []
     for review in state.review_results:
@@ -109,7 +131,8 @@ def _serialize_state(state: "PipelineState") -> dict:
         line = review.finding.start_line
         poc_key = f"{file_uri}:{line}"
         poc = poc_map.get(poc_key)
-        findings.append(_serialize_finding(review, poc))
+        vr = vr_map.get(poc_key)
+        findings.append(_serialize_finding(review, poc, vr))
 
     return {
         "run_id": state.run_id,

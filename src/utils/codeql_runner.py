@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # 各操作的默认超时秒数
 _TIMEOUT_CREATE_DB: int = 3600  # 建库超时：大型项目（如 ByteChef）源码提取可能超过 10 分钟
-_TIMEOUT_COMPILE: int = 120
+_TIMEOUT_COMPILE: int = 600  # 编译超时：首次解析 Python/Java 标准库依赖可能较慢
 _TIMEOUT_ANALYZE: int = 300
 
 

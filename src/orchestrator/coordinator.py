@@ -94,7 +94,7 @@ class PipelineConfig:
     patch_commit: Optional[str] = None   # 修复补丁 commit hash，自动切换到漏洞版本扫描
     enable_code_browser: bool = True     # Agent-R 是否启用 CodeBrowser 智能上下文
     prebuilt_db: Optional[str] = None   # 预先建好的 CodeQL 数据库路径，跳过建库阶段
-    agent_r_workers: int = 1            # Agent-R 并发线程数（1=串行，建议 2~4）
+    agent_r_workers: int = 2            # Agent-R 并发线程数（建议 2~4，避免 LLM 限流）
     agent_r_batch: int = 1              # Agent-R 每次 LLM 调用包含的 finding 数（建议 5~10）
     external_sarif: Optional[str] = None  # 外部 SARIF 文件路径（Checkov/tfsec/Trivy 等输出），跳过 Agent-Q + CodeQL 阶段
     prompt_preset: str = ""              # Agent-T 指定的 prompt 预设（如 "kernel"），传递给 Agent-R/Q
@@ -860,6 +860,21 @@ class Coordinator:
             if r.status == VulnStatus.VULNERABLE
             or r.confidence >= self.config.agent_r_min_confidence
         ]
+
+        zero_conf_results = [r for r in all_results if r.confidence == 0.0]
+        llm_unavailable_results = [
+            r for r in zero_conf_results
+            if "异常" in (r.reasoning or "") or "LLM 未" in (r.reasoning or "")
+        ]
+        if llm_unavailable_results:
+            for r in llm_unavailable_results:
+                if r.status == VulnStatus.SAFE:
+                    r.status = VulnStatus.UNCERTAIN
+                r.reasoning = (
+                    r.reasoning or "CodeQL 发现"
+                ) + "（Agent-R LLM 审查不可用，该条发现未获语义确认，建议人工复核）"
+            filtered.extend(llm_unavailable_results)
+
         dropped = len(all_results) - len(filtered)
 
         logger.info(
@@ -1315,7 +1330,25 @@ class Coordinator:
 
         logger.info("共享数据库路径: %s | 并行启动 %d 个扫描任务...", shared_db_path, len(vuln_types))
 
-        # ── Step 2：并行运行 Phase 2-5（共享无状态 Agent 实例）─────────────
+        # ── 为每个漏洞类型复制独立 DB 副本，Phase 3 可真正并行 ──────────
+        # CodeQL analyze 的 IMB 缓存不支持同一 DB 并发访问，串行排队让
+        # "并行扫描"名存实亡。复制 DB 后每个线程独占一份，analyze 零等待。
+        import shutil
+
+        db_copies: dict[str, str] = {}
+        vt_count = len(vuln_types)
+        for idx, vt in enumerate(vuln_types):
+            if vt_count == 1:
+                db_copies[vt] = shared_db_path
+            else:
+                copy_path = str(Path(shared_db_path).with_name(f"{Path(shared_db_path).name}_copy_{idx}_{vt.replace(' ', '_').replace('/', '_')[:20]}"))
+                if not Path(copy_path).exists():
+                    logger.info("[并行] 复制 CodeQL DB 副本 %d/%d: %s", idx + 1, vt_count, copy_path)
+                    shutil.copytree(shared_db_path, copy_path)
+                else:
+                    logger.info("[并行] DB 副本已存在，复用: %s", copy_path)
+                db_copies[vt] = copy_path
+
         shared_runner = first_coordinator.runner
         shared_agent_r = first_coordinator.agent_r
         shared_agent_s = first_coordinator.agent_s
@@ -1334,7 +1367,7 @@ class Coordinator:
                 _skip_rule_memory_init=True,
             )
             return coordinator.run_from_database(
-                db_path=shared_db_path,
+                db_path=db_copies[vuln_type],
                 source_dir=shared_source_dir,
                 commit_hash=shared_commit_hash,
                 build_command=shared_build_cmd,
@@ -1367,7 +1400,16 @@ class Coordinator:
                     states[idx] = PipelineState(vuln_type=vuln_types[idx])
                     states[idx].error = str(exc)
 
-        # ── Step 3：清理克隆目录（如需）──────────────────────────────────
+        # ── Step 3：清理 DB 副本和克隆目录 ────────────────────────────
+        import shutil as _shutil_cleanup
+        for vt, db_copy in db_copies.items():
+            if vt_count > 1 and db_copy != shared_db_path and Path(db_copy).exists():
+                try:
+                    _shutil_cleanup.rmtree(db_copy)
+                    logger.info("[并行] 已清理 DB 副本: %s", db_copy)
+                except Exception as exc_cleanup:
+                    logger.warning("[并行] 清理 DB 副本失败: %s | %s", db_copy, exc_cleanup)
+
         if base_config.cleanup_workspace and bootstrap_state.cloned_repo_path:
             first_coordinator.repo_manager.cleanup(bootstrap_state.cloned_repo_path)
             logger.info("已清理克隆目录: %s", bootstrap_state.cloned_repo_path)
@@ -1402,6 +1444,7 @@ class Coordinator:
             包含 recon_report / scan_plan / all_states / 统计信息的字典。
         """
         from src.agents.agent_p import AgentP
+        import dataclasses
 
         source_dir = base_config.source_dir
         if not source_dir:
@@ -1419,6 +1462,12 @@ class Coordinator:
             repo_manager=repo_mgr,
             rule_memory=rule_mem,
         )
+
+        if not base_config.language:
+            recon_preview = planner.recon(source_dir)
+            inferred_language = recon_preview.primary_language or "java"
+            base_config = dataclasses.replace(base_config, language=inferred_language)
+            logger.info("[Agent-P] 未指定语言，已根据仓库侦察结果推断为: %s", inferred_language)
 
         return planner.run_autonomous(
             source_dir=source_dir,

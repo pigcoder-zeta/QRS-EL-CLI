@@ -108,6 +108,22 @@ _CONFIRM_PATTERNS: dict[str, list[str]] = {
 }
 
 
+def _check_time_based_blind(payload: str, status_code: int) -> str:
+    """
+    检测时间盲注：SLEEP/BENCHMARK payload + 502/504 超时 = 盲注成功。
+
+    Returns:
+        证据描述字符串，不匹配时返回空字符串。
+    """
+    if status_code not in (502, 504):
+        return ""
+    payload_upper = payload.upper()
+    blind_keywords = ["SLEEP(", "BENCHMARK(", "PG_SLEEP(", "WAITFOR DELAY", "DBMS_LOCK.SLEEP"]
+    if any(kw in payload_upper for kw in blind_keywords):
+        return f"时间盲注 Payload 触发服务超时（HTTP {status_code}）：Payload 包含延时函数，服务端执行后导致网关超时，符合时间盲注特征"
+    return ""
+
+
 def _quick_confirm(response_body: str, vuln_type: str) -> tuple[bool, str]:
     """
     正则快速预检：若匹配直接返回确认，无需 LLM 调用（节省 token）。
@@ -214,7 +230,10 @@ _SYSTEM_PROMPT_E = """\
 
 判断标准：
 - confirmed=true：响应体中出现命令执行回显（uid=、root:x:0:0:）、数据库错误、文件内容、
-  模板求值结果（7*7=49）、内网服务响应等明确证据
+  模板求值结果（7*7=49）、内网服务响应等明确证据。
+- **时间盲注特殊规则**：若 Payload 包含 SLEEP/BENCHMARK/PG_SLEEP/WAITFOR DELAY，
+  且 HTTP 状态码为 502/504（网关超时）或响应明显延迟，应判定 confirmed=true，
+  confidence≥0.9。服务超时本身就是时间盲注成功的直接证据。
 - confirmed=false：响应正常、错误信息无关安全、或明显是应用自身的业务错误
 - 如果无法判断，confidence 应低于 0.5，confirmed=false
 """
@@ -481,6 +500,21 @@ class AgentE(BaseAgent):
                 "[Agent-E] Payload 结果 | code=%d | body_len=%d | payload=%s...",
                 status_code, len(response_body), payload[:30],
             )
+
+            # ── 时间盲注快速预检 ──────────────────────────────────────
+            timing_check = _check_time_based_blind(payload, status_code)
+            if timing_check:
+                logger.info("[Agent-E] 时间盲注预检命中 → CONFIRMED | 证据: %s", timing_check[:80])
+                return VerificationResult(
+                    status=VerificationStatus.CONFIRMED,
+                    confidence=1.0,
+                    evidence=timing_check,
+                    payload_used=payload,
+                    request_summary=req_summary,
+                    response_code=status_code,
+                    response_snippet=snippet,
+                    reason="时间盲注 Payload（SLEEP/BENCHMARK/PG_SLEEP）导致服务超时，确认为盲注成功。",
+                )
 
             # ── 快速正则预检 ──────────────────────────────────────────
             quick_hit, evidence = _quick_confirm(response_body, vuln_type)

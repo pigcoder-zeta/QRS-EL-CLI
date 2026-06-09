@@ -118,7 +118,11 @@ reV/
 │  ├─ web/               # Flask API 服务与前端资源
 │  └─ main.py            # CLI 入口
 ├─ data/                 # 数据库、查询、结果、记忆库
-├─ scripts/              # 辅助脚本（评测/处理）
+├─ scripts/              # 辅助脚本
+│  ├─ benchmark/        # SARIF 评测、Agent-R 批处理
+│  ├─ docs/              # 竞赛/论文文档处理
+│  ├─ dev/               # 模型与 API 调试
+│  └─ assets/            # 前端资源生成（音效等）
 ├─ tests/                # 测试用例
 ├─ requirements.txt
 └─ pyproject.toml

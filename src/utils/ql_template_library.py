@@ -256,9 +256,9 @@ _PYTHON_JINJA2 = QLTemplate(
  * @tags security external/cwe/cwe-094
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class Jinja2SSTISink extends DataFlow::Node {
   Jinja2SSTISink() {
@@ -313,9 +313,9 @@ _PYTHON_MAKO = QLTemplate(
  * @tags security external/cwe/cwe-094
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class MakoSSTISink extends DataFlow::Node {
   MakoSSTISink() {
@@ -362,9 +362,9 @@ _PYTHON_SSTI_COMBINED = QLTemplate(
  * @tags security external/cwe/cwe-094
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class SSTISink extends DataFlow::Node {
   SSTISink() {
@@ -602,7 +602,7 @@ _PYTHON_SQL_INJECTION = QLTemplate(
     key="python/sql-injection",
     language="python",
     vuln_type="sql injection",
-    description="Python SQL 注入（cursor.execute 字符串拼接）",
+    description="Python SQL 注入（cursor.execute / SQLAlchemy / Django ORM 等）",
     code="""\
 /**
  * @name SQL Injection (Python)
@@ -613,17 +613,22 @@ _PYTHON_SQL_INJECTION = QLTemplate(
  * @tags security external/cwe/cwe-089
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class SqlSink extends DataFlow::Node {
   SqlSink() {
     exists(Call c |
       (
         c.getFunc().(Attribute).getName() = "execute" or
-        c.getFunc().(Attribute).getName() = "executemany"
+        c.getFunc().(Attribute).getName() = "executemany" or
+        c.getFunc().(Attribute).getName() = "raw" or
+        c.getFunc().(Attribute).getName() = "text"
       ) and
+      this.asExpr() = c.getArg(0)
+    ) or exists(Call c |
+      c.getFunc().(Name).getId() = "execute" and
       this.asExpr() = c.getArg(0)
     )
   }
@@ -657,9 +662,9 @@ _PYTHON_COMMAND_INJECTION = QLTemplate(
  * @tags security external/cwe/cwe-078
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class CommandSink extends DataFlow::Node {
   CommandSink() {
@@ -1586,9 +1591,9 @@ _PYTHON_PATH_TRAVERSAL = QLTemplate(
  * @tags security external/cwe/cwe-022
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class PathSink extends DataFlow::Node {
   PathSink() {
@@ -1640,9 +1645,9 @@ _PYTHON_XSS = QLTemplate(
  * @tags security external/cwe/cwe-079
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class XssSink extends DataFlow::Node {
   XssSink() {
@@ -1691,9 +1696,9 @@ _PYTHON_SSRF = QLTemplate(
  * @tags security external/cwe/cwe-918
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class SsrfSink extends DataFlow::Node {
   SsrfSink() {
@@ -2276,9 +2281,9 @@ _PYTHON_DESERIALIZATION = QLTemplate(
  * @tags security external/cwe/cwe-502
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class DeserSink extends DataFlow::Node {
   DeserSink() {
@@ -2320,9 +2325,9 @@ _PYTHON_LDAP_INJECTION = QLTemplate(
  * @tags security external/cwe/cwe-090
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class LdapSink extends DataFlow::Node {
   LdapSink() {

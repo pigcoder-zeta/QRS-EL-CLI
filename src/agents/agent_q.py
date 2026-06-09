@@ -145,9 +145,9 @@ _SYSTEM_PROMPT_PYTHON = """\
  * @tags security
  */
 import python
-import semmle.code.python.dataflow.new.DataFlow
-import semmle.code.python.dataflow.new.TaintTracking
-import semmle.code.python.dataflow.new.RemoteFlowSources
+import semmle.python.dataflow.new.DataFlow
+import semmle.python.dataflow.new.TaintTracking
+import semmle.python.dataflow.new.RemoteFlowSources
 
 private class CustomSink extends DataFlow::Node {
   CustomSink() {
@@ -177,8 +177,8 @@ where Flow::flow(source, sink)
 select sink, "SSTI 漏洞描述，数据来自 $@。", source, "用户可控输入"
 
 ━━━━━━━━━━ Python 关键规则（违反任何一条都会编译失败）━━━━━━━━━━
-1. 必须使用 import semmle.code.python.dataflow.new.RemoteFlowSources（注意 new 子路径）
-2. 禁止使用旧路径 semmle.code.python.dataflow.DataFlow（无 new 子路径版本已废弃）
+1. 必须使用 import semmle.python.dataflow.new.RemoteFlowSources（注意 new 子路径）
+2. 禁止使用旧路径 semmle.python.dataflow.DataFlow，也禁止使用不存在的 semmle.code.python.dataflow.* 路径
 3. Python 方法调用用 Call 和 Attribute/Name，不是 MethodCall
 4. 访问调用参数用 c.getArg(0) 而非 c.getArgument(0)
 5. 同样使用 module Flow = TaintTracking::Global<FlowConfig> 和 implements 关键字
@@ -743,6 +743,9 @@ _FIX_TEMPLATE = """\
 【当前代码】
 {current_code}
 
+【本地 CodeQL 标准库证据】
+{codeql_evidence}
+
 修复要求：
 - 严格对照 System Prompt 中的黄金模板检查结构。
 - 重点检查：import 路径、TaintTracking::Global 用法、正确的调用类型（Java=MethodCall, Python=Call）。
@@ -857,6 +860,41 @@ def _extract_ql_code(raw_output: str) -> str:
     return scored[0][2]
 
 
+def _apply_deterministic_codeql_fixes(code: str, language: str, error_message: str) -> str:
+    if language.lower() == "python" and "could not resolve module semmle.code.python" in error_message:
+        return code.replace("semmle.code.python.dataflow", "semmle.python.dataflow")
+    return code
+
+
+def _build_codeql_evidence(language: str, error_message: str) -> str:
+    lang = language.lower()
+    lines = []
+
+    if lang == "python" and (
+        "could not resolve module" in error_message
+        or "semmle.code.python" in error_message
+        or "RemoteFlowSource" in error_message
+    ):
+        lines.extend([
+            "本机 CodeQL Python 标准库使用 semmle.python.* 路径，不使用 semmle.code.python.*。",
+            "可用 import 示例：",
+            "import semmle.python.dataflow.new.DataFlow",
+            "import semmle.python.dataflow.new.TaintTracking",
+            "import semmle.python.dataflow.new.RemoteFlowSources",
+            "如果当前代码包含 semmle.code.python.dataflow.*，应迁移为 semmle.python.dataflow.*。",
+        ])
+
+    if "could not resolve module" in error_message:
+        unresolved = sorted(set(re.findall(r"could not resolve module ([^\s(]+)", error_message)))
+        if unresolved:
+            lines.append("编译器报告无法解析的模块：" + ", ".join(unresolved[:8]))
+
+    if not lines:
+        lines.append("未识别到特定标准库迁移线索；请优先依据编译错误中的 unresolved module/type/predicate 修复。")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Agent-Q 主类
 # ---------------------------------------------------------------------------
@@ -968,6 +1006,19 @@ class AgentQ(BaseAgent):
     # 公开接口
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_compile_timeout(error_msg: str) -> bool:
+        """判断编译错误是否是 CodeQL 超时，而非语法/语义问题。"""
+        if not error_msg:
+            return False
+        timeout_markers = [
+            "超时（",
+            "Command timed out",
+            "TimeLimitExceeded",
+            "timed out after",
+        ]
+        return any(m in error_msg for m in timeout_markers)
+
     def generate_and_compile(
         self,
         language: str,
@@ -1065,6 +1116,32 @@ class AgentQ(BaseAgent):
                 "编译失败（第 %d/%d 次）:\n%s", attempt, self.max_retries, error_msg
             )
 
+            if self._is_compile_timeout(error_msg):
+                if attempt == self.max_retries:
+                    break
+                logger.warning(
+                    "CodeQL 编译超时，这不是代码语法问题，将重试编译（第 %d/%d 次）...",
+                    attempt + 1, self.max_retries,
+                )
+                # 编译超时通常不是代码问题，直接重试即可，不浪费 LLM
+                continue
+
+            repaired_code = _apply_deterministic_codeql_fixes(current_code, language, error_msg)
+            if repaired_code != current_code:
+                logger.info("检测到已知 CodeQL 兼容性错误，先执行确定性预修复。")
+                current_code = repaired_code
+                query_file = self._write_query_to_file(current_code, _filename, language)
+                success, error_msg = self.runner.compile_query(str(query_file))
+                if success:
+                    logger.info(
+                        "确定性预修复后编译成功（第 %d/%d 次尝试）: %s",
+                        attempt,
+                        self.max_retries,
+                        query_file,
+                    )
+                    return query_file
+                logger.warning("确定性预修复后仍编译失败:\n%s", error_msg)
+
             if attempt == self.max_retries:
                 break
 
@@ -1072,6 +1149,7 @@ class AgentQ(BaseAgent):
             fix_prompt = _FIX_TEMPLATE.format(
                 error_message=error_msg,
                 current_code=current_code,
+                codeql_evidence=_build_codeql_evidence(language, error_msg),
             )
             raw_fixed = self._invoke_llm(sys_prompt, fix_prompt)
             current_code = _extract_ql_code(raw_fixed)

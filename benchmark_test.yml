@@ -6,7 +6,7 @@
 #       --source-dir data\benchmark\BenchmarkJava
 #
 # 评分:
-#   python scripts/score_benchmark.py \
+#   python scripts/benchmark/score_benchmark.py \
 #       --sarif-dir data/results/benchmark \
 #       --expected data/benchmark/BenchmarkJava/expectedresults-1.2.csv \
 #       --output data/results/benchmark_score.json

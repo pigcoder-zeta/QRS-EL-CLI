@@ -1,7 +1,12 @@
-import wave
-import struct
 import math
 import os
+import struct
+import wave
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SOUNDS_DIR = ROOT / "frontend" / "public" / "sounds"
+
 
 def generate_tone(filename, freq, duration, volume=0.5, attack=0.01, decay=0.1):
     sample_rate = 44100.0
@@ -29,10 +34,10 @@ def generate_tone(filename, freq, duration, volume=0.5, attack=0.01, decay=0.1):
             wav_file.writeframesraw(data)
 
 # 悬停：微小的高频“滴”声
-generate_tone('public/sounds/hover.wav', 880.0, 0.05, 0.3)
+generate_tone(str(SOUNDS_DIR / "hover.wav"), 880.0, 0.05, 0.3)
 # 点击：实心的低频确认声
-generate_tone('public/sounds/click.wav', 440.0, 0.1, 0.5)
+generate_tone(str(SOUNDS_DIR / "click.wav"), 440.0, 0.1, 0.5)
 # 报警/扫描：类似雷达的扫描声 (高-低)
-generate_tone('public/sounds/scan.wav', 1200.0, 0.2, 0.4)
+generate_tone(str(SOUNDS_DIR / "scan.wav"), 1200.0, 0.2, 0.4)
 # 成功: 上升调 (需要修改上面的生成器来支持频率扫描，这里用简单的单音代替，稍后如果要求更高可以完善)
-generate_tone('public/sounds/success.wav', 1600.0, 0.3, 0.5)
+generate_tone(str(SOUNDS_DIR / "success.wav"), 1600.0, 0.3, 0.5)

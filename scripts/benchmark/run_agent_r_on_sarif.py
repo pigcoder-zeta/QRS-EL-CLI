@@ -5,7 +5,7 @@
       预期最终达到高召回 + 高精确的联合效果。
 
 用法：
-    python scripts/run_agent_r_on_sarif.py \
+    python scripts/benchmark/run_agent_r_on_sarif.py \
         --sarif data/results/benchmark/sarif_official_cmdinj.sarif \
         --repo  data/benchmark/BenchmarkJava \
         --language java \
@@ -30,7 +30,7 @@ if hasattr(sys.stderr, "reconfigure"):
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 # 把项目根目录加入 sys.path
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 # StreamHandler 使用 UTF-8 stdout，write_through=True 禁止内部缓冲

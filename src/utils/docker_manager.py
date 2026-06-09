@@ -307,7 +307,9 @@ class DockerManager:
         path: str,
         params: Optional[dict] = None,
         data: Optional[dict] = None,
+        json_body: Optional[dict] = None,
         headers: Optional[dict] = None,
+        cookies: Optional[dict] = None,
         timeout: int = _TIMEOUT_REQUEST,
     ) -> tuple[int, str]:
         """
@@ -322,10 +324,10 @@ class DockerManager:
             raise RuntimeError("requests 库未安装：pip install requests")
 
         url = base_url.rstrip("/") + "/" + path.lstrip("/")
-        effective_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        effective_headers = {}
         effective_headers.update(headers or {})
 
-        logger.debug("[DockerManager] %s %s  params=%s  data=%s", method, url, params, data)
+        logger.debug("[DockerManager] %s %s  params=%s  data=%s  json=%s", method, url, params, data, bool(json_body))
 
         try:
             resp = _req.request(
@@ -333,7 +335,9 @@ class DockerManager:
                 url=url,
                 params=params,
                 data=data,
-                headers=effective_headers,
+                json=json_body,
+                headers=effective_headers or None,
+                cookies=cookies,
                 timeout=timeout,
                 allow_redirects=True,
                 verify=False,   # 自签名证书
